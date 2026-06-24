@@ -249,7 +249,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         saveLocalDraftIfNeeded()
         refreshLocalDrafts()
         status = .captured
-        message = "스캔 경로를 저장했습니다. 서버 처리 후 공간과 통행 관계를 검수해야 합니다."
+        message = "스캔 경로를 저장했습니다. 서버가 3D 디지털트윈과 사용자용 2D 지도를 만든 뒤 검수할 수 있습니다."
     }
 
     func refreshLocalDrafts() {

@@ -1062,11 +1062,11 @@ struct ContentView: View {
         if let graph = scanner.reviewGraph {
             VStack(spacing: 20) {
                 VStack(spacing: 10) {
-                    Text("검수할 지도입니다")
+                    Text("2D 게시 지도 검수")
                         .font(.system(size: 38, weight: .black, design: .rounded))
                         .foregroundStyle(AdminTheme.ink)
                         .multilineTextAlignment(.center)
-                    Text("목적지 이름, 층 이동, 위험 후보만 확인하면 게시할 수 있습니다")
+                    Text("서버가 만든 디지털트윈에서 사용자 앱용 2D 지도와 목적지 태그만 검수합니다")
                         .font(.headline.weight(.bold))
                         .foregroundStyle(AdminTheme.mutedInk)
                         .multilineTextAlignment(.center)
@@ -1422,7 +1422,7 @@ struct ContentView: View {
             issues.append("VGGT가 구조를 잡을 수 있게 문, 표지판, 벽면, 바닥 경계를 여러 각도에서 더 오래 훑어 주세요.")
         }
         if scanner.spatialPreviewPoints.count < 40 {
-            issues.append("우측 상단 3D 프리뷰가 충분히 채워지도록 바닥과 벽이 함께 보이게 천천히 스캔해 주세요.")
+            issues.append("서버 재구성에 필요한 특징점이 부족합니다. 바닥과 벽이 함께 보이게 천천히 스캔해 주세요.")
         }
         if scanner.totalDistance < 8 {
             issues.append("복도 중심선을 따라 최소 \(Int(ceil(8 - scanner.totalDistance)))미터 더 걸어 주세요.")
@@ -1450,7 +1450,7 @@ struct ContentView: View {
             return "너무 빠릅니다. 천천히 걷고 휴대폰 회전을 줄여 주세요"
         }
         if scanner.spatialPreviewPoints.count < 40 && scanner.sampleCount > 6 {
-            return "바닥과 벽을 함께 비춰 우측 상단 3D 구조를 채워 주세요"
+            return "바닥과 벽을 함께 비춰 서버 재구성용 특징점을 더 모아 주세요"
         }
         if scanner.keyframeCount < 20 {
             return "VGGT용 핵심 화면을 모으는 중입니다. 벽·바닥·문을 천천히 훑어 주세요"
@@ -2095,9 +2095,9 @@ private struct MiniSpatialScanMap: View {
 
             if path.isEmpty && spatialPoints.isEmpty {
                 VStack(spacing: 4) {
-                    Image(systemName: "view.3d")
+                    Image(systemName: "sparkles")
                         .font(.headline.weight(.black))
-                    Text("공간 스캔")
+                    Text("특징점 스캔")
                         .font(.caption2.weight(.black))
                 }
                 .foregroundStyle(AdminTheme.violet)
@@ -2112,7 +2112,7 @@ private struct MiniSpatialScanMap: View {
                         .padding(.vertical, 4)
                         .background(.white.opacity(0.90), in: Capsule())
                     Spacer()
-                    Text("3D")
+                    Text("스캔")
                         .font(.caption2.weight(.black))
                         .foregroundStyle(AdminTheme.ink)
                         .padding(.horizontal, 7)
@@ -2133,7 +2133,7 @@ private struct MiniSpatialScanMap: View {
                         .background(.white.opacity(0.88), in: Capsule())
                     Spacer()
                     if meshAnchorCount == 0 && !spatialPoints.isEmpty {
-                        Text(supportsMeshReconstruction ? "표면 수집" : "서버 재구성")
+                        Text(supportsMeshReconstruction ? "표면 보조" : "후처리용")
                             .font(.caption2.weight(.black))
                             .foregroundStyle(supportsMeshReconstruction ? AdminTheme.caution : AdminTheme.violet)
                             .padding(.horizontal, 7)
@@ -2149,7 +2149,7 @@ private struct MiniSpatialScanMap: View {
 
     private var primaryStatusText: String {
         if meshAnchorCount > 0 {
-            return "표면 \(compactCount(meshVertexCount))"
+            return "보조 \(compactCount(meshVertexCount))"
         }
         if supportsMeshReconstruction {
             return "구조점 \(spatialPoints.count)"
