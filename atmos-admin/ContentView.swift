@@ -12,12 +12,9 @@ struct ContentView: View {
     @State private var showsSpaceInfoSheet = false
     @State private var showsUploadInfoSheet = false
     @State private var showsSavedScans = false
-    @State private var showsServerSettings = false
     @State private var showsReviewSheet = false
     @State private var showsPackageOperations = false
     @State private var showsFloorPicker = false
-    @State private var serverAddressDraft = AdminServerConfiguration.baseURLString
-    @State private var serverSettingsMessage: String?
     @State private var reviewSearchText = ""
     @State private var showAdvancedReview = false
 
@@ -47,11 +44,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showsSavedScans) {
             savedScansSheet
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $showsServerSettings) {
-            serverSettingsSheet
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -133,11 +125,6 @@ struct ContentView: View {
                     minimalHomeAction("작업", systemImage: "folder.fill") {
                         showsSavedScans = true
                     }
-                    minimalHomeAction("서버", systemImage: "server.rack") {
-                        serverAddressDraft = AdminServerConfiguration.baseURLString
-                        serverSettingsMessage = nil
-                        showsServerSettings = true
-                    }
                     minimalHomeAction("게시", systemImage: "paperplane.fill") {
                         showsPackageOperations = true
                     }
@@ -155,11 +142,6 @@ struct ContentView: View {
             statusBadge
                 .foregroundStyle(.white)
             Spacer()
-            AdminIconButton(systemName: "server.rack", accessibilityLabel: "서버 주소 설정") {
-                serverAddressDraft = AdminServerConfiguration.baseURLString
-                serverSettingsMessage = nil
-                showsServerSettings = true
-            }
         }
         .padding(.horizontal, 18)
         .padding(.top, 18)
@@ -267,15 +249,8 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 10) {
-                    AdminIconButton(systemName: "server.rack", accessibilityLabel: "서버 주소 설정") {
-                        serverAddressDraft = AdminServerConfiguration.baseURLString
-                        serverSettingsMessage = nil
-                        showsServerSettings = true
-                    }
-                    statusBadge
-                        .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 6)
-                }
+                statusBadge
+                    .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 6)
             }
             Text("한 번 스캔한 뒤 서버가 자동으로 장면 그래프를 만들고, 관리자는 목적지와 층 이동만 검수합니다.")
                 .font(.headline.weight(.semibold))
@@ -367,14 +342,12 @@ struct ContentView: View {
                     showsSavedScans = true
                 }
                 adminQuickAction(
-                    title: "서버 설정",
-                    subtitle: "주소 연결",
-                    symbol: "server.rack",
+                    title: "게시 관리",
+                    subtitle: "배포 이력",
+                    symbol: "paperplane.fill",
                     color: AdminTheme.route
                 ) {
-                    serverAddressDraft = AdminServerConfiguration.baseURLString
-                    serverSettingsMessage = nil
-                    showsServerSettings = true
+                    showsPackageOperations = true
                 }
             }
         }
@@ -507,75 +480,6 @@ struct ContentView: View {
             .background(AdminTheme.canvas)
             .navigationTitle("작업 복구")
             .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private var serverSettingsSheet: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    cardHeader("서버 주소", symbol: "server.rack", subtitle: "스캔 자료를 전송할 Riav API 서버 주소를 입력합니다.")
-                    serverStatusCard
-                    TextField("예: https://riav.duckdns.org", text: $serverAddressDraft)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.body.monospaced().weight(.semibold))
-                        .padding(16)
-                        .background(AdminTheme.canvas.opacity(0.82), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(.black.opacity(0.06), lineWidth: 1)
-                        )
-                    if let serverSettingsMessage {
-                        Text(serverSettingsMessage)
-                            .font(.footnote.weight(.bold))
-                            .foregroundStyle(serverSettingsMessage.contains("저장") ? AdminTheme.safe : AdminTheme.danger)
-                    }
-                    Button {
-                        do {
-                            try AdminServerConfiguration.save(serverAddressDraft)
-                            serverAddressDraft = AdminServerConfiguration.baseURLString
-                            serverSettingsMessage = "저장했습니다. 현재 주소: \(AdminServerConfiguration.baseURLString)"
-                            Task {
-                                await scanner.refreshServerJobs()
-                                await scanner.refreshSystemStatus()
-                            }
-                        } catch {
-                            serverSettingsMessage = error.localizedDescription
-                        }
-                    } label: {
-                        Label("서버 주소 저장", systemImage: "checkmark.circle.fill")
-                    }
-                    .buttonStyle(AdminPrimaryButtonStyle())
-                    Button {
-                        serverAddressDraft = AdminServerConfiguration.defaultBaseURLString
-                        do {
-                            try AdminServerConfiguration.save(serverAddressDraft)
-                            serverSettingsMessage = "기본 주소로 되돌렸습니다."
-                            Task {
-                                await scanner.refreshServerJobs()
-                                await scanner.refreshSystemStatus()
-                            }
-                        } catch {
-                            serverSettingsMessage = error.localizedDescription
-                        }
-                    } label: {
-                        Text("기본 주소로 되돌리기")
-                            .font(.headline.weight(.black))
-                            .foregroundStyle(AdminTheme.ink)
-                            .frame(maxWidth: .infinity, minHeight: 52)
-                            .background(AdminTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
-                }
-                .padding(22)
-            }
-            .background(AdminTheme.canvas)
-            .navigationTitle("서버 설정")
-            .navigationBarTitleDisplayMode(.inline)
-            .task {
-                await scanner.refreshSystemStatus()
-            }
         }
     }
 
@@ -1158,8 +1062,10 @@ struct ContentView: View {
                 }
                 HStack(spacing: 8) {
                     reviewStat("목적지", "\(semanticReviewNodes(in: graph).count)", AdminTheme.violet)
-                    reviewStat("연결", "\(graph.relations.count)", AdminTheme.route)
+                    reviewStat("경로", "\(routeWaypointCount(in: graph))", AdminTheme.route)
                 }
+                ReviewMapOverview(graph: graph)
+                    .frame(height: 300)
                 aiReviewSummary(graph)
                 PrePublishChecklist(graph: graph)
                 VStack(alignment: .leading, spacing: 12) {
@@ -1240,10 +1146,10 @@ struct ContentView: View {
                 .background(AdminTheme.canvas.opacity(0.74), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                 VStack(spacing: 10) {
                     Button { Task { await scanner.publishReviewedScan() } } label: {
-                        Text("검수 완료로 게시")
+                        Text("현재 검수 상태로 게시")
                     }
                     .buttonStyle(AdminPrimaryButtonStyle())
-                    Text("게시 후 사용자 앱에서 이 건물을 내려받을 수 있습니다")
+                    Text("게시 후 사용자 앱에서 이 건물을 내려받을 수 있습니다. 확실하지 않은 후보는 먼저 거절하세요")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(AdminTheme.mutedInk)
                         .multilineTextAlignment(.center)
@@ -1277,16 +1183,19 @@ struct ContentView: View {
                 Button {
                     Task { await scanner.approveRecommendedCandidates() }
                 } label: {
-                    Text("추천 승인")
+                    Label("추천만 적용", systemImage: "checkmark.seal.fill")
                 }
                 .buttonStyle(AdminSecondaryButtonStyle())
                 Button {
                     Task { await scanner.approveRecommendedCandidates(publishAfterApproval: true) }
                 } label: {
-                    Text("승인 후 게시")
+                    Label("추천 적용 후 게시", systemImage: "paperplane.fill")
                 }
                 .buttonStyle(AdminPrimaryButtonStyle())
             }
+            Text("추천 적용은 스캔 경로와 신뢰도 높은 목적지를 승인합니다. 잘못 잡힌 방 이름이나 출입 제한 후보만 고친 뒤 게시하면 됩니다.")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(AdminTheme.mutedInk)
         }
         .padding(18)
         .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
@@ -1305,6 +1214,10 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 58)
         .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func routeWaypointCount(in graph: SceneGraphValue) -> Int {
+        graph.nodes.filter { $0.id.hasPrefix("trajectory:") && $0.reviewStatus != "rejected" }.count
     }
 
     private func reviewNodes(for graph: SceneGraphValue) -> [SceneGraphNodeValue] {
@@ -1761,6 +1674,206 @@ private final class AdminAddressLocator: NSObject, ObservableObject, CLLocationM
     }
 }
 
+private struct ReviewMapOverview: View {
+    let graph: SceneGraphValue
+
+    private var visibleNodes: [SceneGraphNodeValue] {
+        graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
+    }
+
+    private var routeNodes: [SceneGraphNodeValue] {
+        graph.nodes
+            .filter { $0.id.hasPrefix("trajectory:") && $0.reviewStatus != "rejected" }
+            .sorted { lhs, rhs in
+                trajectoryIndex(lhs.id) < trajectoryIndex(rhs.id)
+            }
+    }
+
+    private var destinationNodes: [SceneGraphNodeValue] {
+        graph.nodes
+            .filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "floor" && $0.reviewStatus != "rejected" }
+            .sorted { lhs, rhs in
+                if nodePriority(lhs) != nodePriority(rhs) { return nodePriority(lhs) < nodePriority(rhs) }
+                return lhs.id < rhs.id
+            }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("생성된 지도 미리보기", systemImage: "map.fill")
+                    .font(.headline.weight(.black))
+                    .foregroundStyle(AdminTheme.ink)
+                Spacer()
+                Text("경로 \(routeNodes.count)개 · 후보 \(destinationNodes.count)개")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AdminTheme.mutedInk)
+            }
+            GeometryReader { proxy in
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [.white.opacity(0.96), AdminTheme.softViolet.opacity(0.46)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    grid(in: proxy.size)
+                        .stroke(AdminTheme.stroke.opacity(0.58), lineWidth: 1)
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    if routeNodes.count >= 2 {
+                        Path { path in
+                            path.move(to: point(for: routeNodes[0], in: proxy.size))
+                            for node in routeNodes.dropFirst() {
+                                path.addLine(to: point(for: node, in: proxy.size))
+                            }
+                        }
+                        .stroke(AdminTheme.violet, style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
+                    }
+                    ForEach(routeNodes) { node in
+                        Circle()
+                            .fill(AdminTheme.violet)
+                            .frame(width: node.id == routeNodes.first?.id || node.id == routeNodes.last?.id ? 17 : 11)
+                            .overlay(Circle().stroke(.white, lineWidth: 3))
+                            .position(point(for: node, in: proxy.size))
+                            .accessibilityHidden(true)
+                    }
+                    ForEach(destinationNodes.prefix(18)) { node in
+                        MapCandidateMarker(node: node)
+                            .position(point(for: node, in: proxy.size))
+                    }
+                    if routeNodes.count < 2 {
+                        VStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.title2.weight(.black))
+                            Text("스캔 경로가 부족합니다")
+                                .font(.headline.weight(.black))
+                            Text("복도 중심으로 조금 더 이동하며 다시 스캔하세요")
+                                .font(.caption.weight(.bold))
+                        }
+                        .foregroundStyle(AdminTheme.caution)
+                    }
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Text("북")
+                                .font(.caption2.weight(.black))
+                                .foregroundStyle(AdminTheme.ink)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(.white.opacity(0.92), in: Capsule())
+                        }
+                        Spacer()
+                    }
+                    .padding(10)
+                }
+            }
+            HStack(spacing: 8) {
+                legend("경로", color: AdminTheme.violet)
+                legend("목적지", color: AdminTheme.safe)
+                legend("확인", color: AdminTheme.caution)
+                legend("주의", color: AdminTheme.danger)
+            }
+            .font(.caption.weight(.bold))
+        }
+        .padding(16)
+        .background(.white.opacity(0.80), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(.white.opacity(0.78), lineWidth: 1))
+        .shadow(color: AdminTheme.shadow(0.07), radius: 16, y: 8)
+    }
+
+    private func grid(in size: CGSize) -> Path {
+        Path { path in
+            for ratio in [0.25, 0.5, 0.75] {
+                let x = size.width * ratio
+                path.move(to: CGPoint(x: x, y: 0))
+                path.addLine(to: CGPoint(x: x, y: size.height))
+                let y = size.height * ratio
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: size.width, y: y))
+            }
+        }
+    }
+
+    private func point(for node: SceneGraphNodeValue, in size: CGSize) -> CGPoint {
+        let nodes = visibleNodes.isEmpty ? [node] : visibleNodes
+        let xs = nodes.map { Double($0.geometry.center.x) }
+        let zs = nodes.map { Double($0.geometry.center.z) }
+        let minX = xs.min() ?? 0
+        let maxX = xs.max() ?? 1
+        let minZ = zs.min() ?? 0
+        let maxZ = zs.max() ?? 1
+        let padding = 30.0
+        return CGPoint(
+            x: padding + (Double(node.geometry.center.x) - minX) / max(maxX - minX, 1) * (size.width - padding * 2),
+            y: size.height - padding - (Double(node.geometry.center.z) - minZ) / max(maxZ - minZ, 1) * (size.height - padding * 2)
+        )
+    }
+
+    private func legend(_ title: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(title).foregroundStyle(AdminTheme.mutedInk)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func trajectoryIndex(_ id: String) -> Int {
+        Int(id.split(separator: ":").last ?? "") ?? 0
+    }
+
+    private func nodePriority(_ node: SceneGraphNodeValue) -> Int {
+        if node.attributes["hazard"] == "true" { return 0 }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" { return 1 }
+        if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" { return 2 }
+        return 3
+    }
+}
+
+private struct MapCandidateMarker: View {
+    let node: SceneGraphNodeValue
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Image(systemName: symbol)
+                .font(.caption.weight(.black))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(color, in: Circle())
+                .overlay(Circle().stroke(.white, lineWidth: 2))
+                .shadow(color: color.opacity(0.28), radius: 7, y: 4)
+            Text(node.labels.first ?? node.id)
+                .font(.caption2.weight(.black))
+                .foregroundStyle(AdminTheme.ink)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.white.opacity(0.88), in: Capsule())
+        }
+        .frame(width: 92)
+        .accessibilityLabel("\(node.labels.first ?? node.id) 후보")
+    }
+
+    private var color: Color {
+        if node.attributes["hazard"] == "true" { return AdminTheme.danger }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" { return AdminTheme.caution }
+        if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" { return AdminTheme.safe }
+        return AdminTheme.route
+    }
+
+    private var symbol: String {
+        let type = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
+        switch type {
+        case "elevator": return "arrow.up.arrow.down"
+        case "stairs", "escalator": return "stairs"
+        case "door": return "door.left.hand.open"
+        case "room": return "mappin.and.ellipse"
+        default: return node.attributes["hazard"] == "true" ? "exclamationmark" : "sparkle"
+        }
+    }
+}
+
 private struct EditableGraphMap: View {
     let graph: SceneGraphValue
     let onMove: (_ node: SceneGraphNodeValue, _ center: Vector3Value) -> Void
@@ -2040,7 +2153,7 @@ private struct PrePublishChecklist: View {
                 .font(.headline.weight(.black))
                 .foregroundStyle(isReady ? AdminTheme.safe : AdminTheme.caution)
             checklistRow("보행 경로 노드 2개 이상", ok: routeNodes.count >= 2)
-            checklistRow("승인된 경로 연결 1개 이상", ok: approvedPathRelations >= 1)
+            checklistRow("차단되지 않은 경로 연결 1개 이상", ok: publishablePathRelations >= 1)
             checklistRow("계단·엘리베이터 층 정보 입력", ok: floorTransitionNodesReady)
             checklistRow("위험·출입 제한 후보 확인", ok: hazardAndRestrictedReviewed)
             if !blockingMessages.isEmpty {
@@ -2064,10 +2177,10 @@ private struct PrePublishChecklist: View {
     }
 
     private var routeNodes: [SceneGraphNodeValue] {
-        graph.nodes.filter { ["scan_waypoint", "door", "room", "stairs", "elevator"].contains($0.kind) && $0.reviewStatus != "rejected" }
+        graph.nodes.filter { $0.id.hasPrefix("trajectory:") && $0.reviewStatus != "rejected" }
     }
 
-    private var approvedPathRelations: Int {
+    private var publishablePathRelations: Int {
         graph.relations.filter { $0.predicate == "scan_path_connected" && $0.reviewStatus != "rejected" && $0.attributes["accessible"] != "false" }.count
     }
 
@@ -2084,7 +2197,7 @@ private struct PrePublishChecklist: View {
     }
 
     private var isReady: Bool {
-        routeNodes.count >= 2 && approvedPathRelations >= 1 && floorTransitionNodesReady && hazardAndRestrictedReviewed
+        routeNodes.count >= 2 && publishablePathRelations >= 1 && floorTransitionNodesReady && hazardAndRestrictedReviewed
     }
 
     private var blockingMessages: [String] {
@@ -2092,8 +2205,8 @@ private struct PrePublishChecklist: View {
         if routeNodes.count < 2 {
             messages.append("경로 노드가 부족합니다. 복도 중심 경로를 더 승인하세요.")
         }
-        if approvedPathRelations < 1 {
-            messages.append("승인된 경로 연결이 없습니다. 연결 관계를 확인하세요.")
+        if publishablePathRelations < 1 {
+            messages.append("사용 가능한 경로 연결이 없습니다. 연결 관계를 확인하세요.")
         }
         if !floorTransitionNodesReady {
             messages.append("계단·엘리베이터 노드의 층 이름을 입력하세요.")

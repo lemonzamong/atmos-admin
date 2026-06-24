@@ -335,20 +335,14 @@ struct AdminAPIClient {
 }
 
 enum AdminServerConfiguration {
-    static let userDefaultsKey = "atmosServerBaseURL"
-
     static var baseURL: URL {
-        if let saved = UserDefaults.standard.string(forKey: userDefaultsKey),
-           let url = normalizedURL(from: saved) {
-            return url
-        }
         if let value = Bundle.main.object(forInfoDictionaryKey: "ATMOS_API_BASE_URL") as? String,
            let url = URL(string: value), !value.isEmpty { return url }
         return URL(string: "https://riav.duckdns.org")!
     }
 
     static var baseURLString: String {
-        UserDefaults.standard.string(forKey: userDefaultsKey) ?? defaultBaseURLString
+        defaultBaseURLString
     }
 
     static var defaultBaseURLString: String {
@@ -358,38 +352,17 @@ enum AdminServerConfiguration {
         }
         return "https://riav.duckdns.org"
     }
-
-    static func save(_ value: String) throws {
-        guard let url = normalizedURL(from: value) else {
-            throw APIError.invalidServerURL
-        }
-        UserDefaults.standard.set(url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")), forKey: userDefaultsKey)
-    }
-
-    private static func normalizedURL(from rawValue: String) -> URL? {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
-        guard let url = URL(string: withScheme),
-              let scheme = url.scheme,
-              ["http", "https"].contains(scheme),
-              url.host != nil else {
-            return nil
-        }
-        return url
-    }
 }
 
 enum APIError: LocalizedError {
     case invalidResponse
     case serverMessage(statusCode: Int, detail: String?)
     case processingFailed(String)
-    case invalidServerURL
     case invalidBuildingInfo
 
     var errorDescription: String? {
         switch self {
-        case .invalidResponse: "서버가 요청을 처리하지 못했습니다. 개발 서버 주소와 실행 상태를 확인해 주세요."
+        case .invalidResponse: "서버가 요청을 처리하지 못했습니다. 네트워크 상태와 운영 서버 상태를 확인해 주세요."
         case .serverMessage(let statusCode, let detail):
             if let detail, !detail.isEmpty {
                 "서버 오류 \(statusCode): \(detail)"
@@ -397,8 +370,6 @@ enum APIError: LocalizedError {
                 "서버 오류 \(statusCode): 요청을 처리하지 못했습니다."
             }
         case .processingFailed(let message): message
-        case .invalidServerURL:
-            "서버 주소 형식이 올바르지 않습니다. 예: https://riav.duckdns.org"
         case .invalidBuildingInfo:
             "건물 이름과 주소를 먼저 입력해 주세요."
         }
