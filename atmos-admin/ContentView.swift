@@ -1,6 +1,7 @@
 import Combine
 import Contacts
 import CoreLocation
+import SceneKit
 import SwiftUI
 
 struct ContentView: View {
@@ -1030,11 +1031,11 @@ struct ContentView: View {
             qualityRow("정상 추적 90% 이상", ok: scanner.normalTrackingRatio >= 0.9 || scanner.sampleCount == 0)
             qualityRow("평균 특징점 100개 이상", ok: scanner.averageFeaturePointCount >= 100 || scanner.sampleCount == 0)
             qualityRow("실시간 안정성 65점 이상", ok: scanner.scanStabilityScore >= 0.65 || scanner.sampleCount == 0)
-            qualityRow("핵심 화면 12장 이상", ok: scanner.keyframeCount >= 12 || scanner.sampleCount == 0)
+            qualityRow("핵심 화면 20장 이상", ok: scanner.keyframeCount >= 20 || scanner.sampleCount == 0)
             qualityRow("이동 거리 8미터 이상", ok: scanner.totalDistance >= 8 || scanner.sampleCount == 0)
             qualityRow("스캔 커버리지 6미터 이상", ok: scanner.coverageSpanMeters >= 6 || scanner.sampleCount == 0)
-            qualityRow("공간 메시 또는 특징점 확보", ok: !scanner.spatialPreviewPoints.isEmpty || scanner.sampleCount == 0)
-            qualityRow("학습 데이터셋 포즈·이미지·공간 샘플 확보", ok: scanner.keyframeCount >= 12 && !scanner.spatialPreviewPoints.isEmpty || scanner.sampleCount == 0)
+            qualityRow("공간 구조점 40개 이상", ok: scanner.spatialPreviewPoints.count >= 40 || scanner.sampleCount == 0)
+            qualityRow("학습 데이터셋 포즈·이미지·공간 샘플 확보", ok: scanner.keyframeCount >= 20 && scanner.spatialPreviewPoints.count >= 40 || scanner.sampleCount == 0)
             qualityRow("개인정보·문서 노출 최소화", ok: true)
             if !qualityIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1382,10 +1383,10 @@ struct ContentView: View {
         let tracking = min(scanner.normalTrackingRatio / 0.9, 1)
         let features = min(scanner.averageFeaturePointCount / 100, 1)
         let stability = min(scanner.scanStabilityScore / 0.65, 1)
-        let keyframes = min(Double(scanner.keyframeCount) / 12, 1)
+        let keyframes = min(Double(scanner.keyframeCount) / 20, 1)
         let distance = min(scanner.totalDistance / 8, 1)
         let coverage = min(scanner.coverageSpanMeters / 6, 1)
-        let spatial = scanner.spatialPreviewPoints.isEmpty ? 0.0 : 1.0
+        let spatial = min(Double(scanner.spatialPreviewPoints.count) / 80, 1)
         return max(0, min(1, tracking * 0.23 + features * 0.18 + stability * 0.16 + keyframes * 0.20 + distance * 0.09 + coverage * 0.08 + spatial * 0.06))
     }
 
@@ -1416,11 +1417,11 @@ struct ContentView: View {
         if scanner.scanStabilityScore < 0.65 {
             issues.append("급하게 걷거나 회전하지 말고 휴대폰을 천천히 훑어 주세요.")
         }
-        if scanner.keyframeCount < 12 {
-            issues.append("VGGT가 구조를 잡을 수 있게 문, 표지판, 벽면, 바닥 경계를 더 오래 훑어 주세요.")
+        if scanner.keyframeCount < 20 {
+            issues.append("VGGT가 구조를 잡을 수 있게 문, 표지판, 벽면, 바닥 경계를 여러 각도에서 더 오래 훑어 주세요.")
         }
-        if scanner.spatialPreviewPoints.isEmpty {
-            issues.append("우측 상단 공간 프리뷰가 채워지도록 바닥과 벽이 함께 보이게 천천히 스캔해 주세요.")
+        if scanner.spatialPreviewPoints.count < 40 {
+            issues.append("우측 상단 3D 프리뷰가 충분히 채워지도록 바닥과 벽이 함께 보이게 천천히 스캔해 주세요.")
         }
         if scanner.totalDistance < 8 {
             issues.append("복도 중심선을 따라 최소 \(Int(ceil(8 - scanner.totalDistance)))미터 더 걸어 주세요.")
@@ -1447,10 +1448,10 @@ struct ContentView: View {
         if scanner.scanStabilityScore < 0.65 && scanner.sampleCount > 10 {
             return "너무 빠릅니다. 천천히 걷고 휴대폰 회전을 줄여 주세요"
         }
-        if scanner.spatialPreviewPoints.isEmpty && scanner.sampleCount > 6 {
-            return "바닥과 벽을 함께 비춰 우측 상단 공간 프리뷰를 채워 주세요"
+        if scanner.spatialPreviewPoints.count < 40 && scanner.sampleCount > 6 {
+            return "바닥과 벽을 함께 비춰 우측 상단 3D 구조를 채워 주세요"
         }
-        if scanner.keyframeCount < 12 {
+        if scanner.keyframeCount < 20 {
             return "VGGT용 핵심 화면을 모으는 중입니다. 벽·바닥·문을 천천히 훑어 주세요"
         }
         if scanner.totalDistance < 8 {
@@ -2074,127 +2075,74 @@ private struct MiniSpatialScanMap: View {
     let meshVertexCount: Int
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.white.opacity(0.94))
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(red: 0.965, green: 0.972, blue: 0.990).opacity(0.96))
+            MiniSpatialSceneView(
+                path: path,
+                spatialPoints: spatialPoints,
+                headingDegrees: headingDegrees,
+                hasMesh: meshAnchorCount > 0
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(.white.opacity(0.70), lineWidth: 1)
-                grid(in: proxy.size)
-                    .stroke(AdminTheme.stroke.opacity(0.62), lineWidth: 1)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            )
+            .opacity(path.isEmpty && spatialPoints.isEmpty ? 0.16 : 1)
 
-                ForEach(Array(spatialPoints.prefix(180).enumerated()), id: \.offset) { _, item in
-                    Circle()
-                        .fill(pointColor(item))
-                        .frame(width: 3.2, height: 3.2)
-                        .position(point(for: item, in: proxy.size))
-                        .opacity(0.78)
+            if path.isEmpty && spatialPoints.isEmpty {
+                VStack(spacing: 4) {
+                    Image(systemName: "view.3d")
+                        .font(.headline.weight(.black))
+                    Text("공간 스캔")
+                        .font(.caption2.weight(.black))
                 }
+                .foregroundStyle(AdminTheme.violet)
+            }
 
-                if path.count >= 2 {
-                    Path { drawing in
-                        drawing.move(to: point(for: path[0], in: proxy.size))
-                        for item in path.dropFirst() {
-                            drawing.addLine(to: point(for: item, in: proxy.size))
-                        }
-                    }
-                    .stroke(AdminTheme.violet, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-
-                    VStack(spacing: 1) {
-                        Image(systemName: "location.north.fill")
-                            .font(.system(size: 25, weight: .black))
-                            .foregroundStyle(AdminTheme.violet)
-                            .rotationEffect(.degrees(-headingDegrees), anchor: .center)
-                        Circle()
-                            .fill(AdminTheme.safe)
-                            .frame(width: 7, height: 7)
-                    }
-                    .position(point(for: path.last!, in: proxy.size))
-                    .accessibilityHidden(true)
-                } else {
-                    VStack(spacing: 4) {
-                        Image(systemName: "view.3d")
-                            .font(.headline.weight(.black))
-                        Text("공간 스캔")
-                            .font(.caption2.weight(.black))
-                    }
-                    .foregroundStyle(AdminTheme.violet)
-                }
-
-                VStack {
-                    HStack {
-                        Text(meshAnchorCount > 0 ? "메시 \(compactCount(meshVertexCount))" : "점 \(spatialPoints.count)")
-                            .font(.caption2.weight(.black))
-                            .foregroundStyle(meshAnchorCount > 0 ? AdminTheme.safe : AdminTheme.violet)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(.white.opacity(0.90), in: Capsule())
-                        Spacer()
-                        Text("북")
-                            .font(.caption2.weight(.black))
-                            .foregroundStyle(AdminTheme.ink)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(.white.opacity(0.90), in: Capsule())
-                    }
+            VStack {
+                HStack {
+                    Text(meshAnchorCount > 0 ? "메시 \(compactCount(meshVertexCount))" : "구조점 \(spatialPoints.count)")
+                        .font(.caption2.weight(.black))
+                        .foregroundStyle(meshAnchorCount > 0 ? AdminTheme.safe : AdminTheme.violet)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(.white.opacity(0.90), in: Capsule())
                     Spacer()
+                    Text("3D")
+                        .font(.caption2.weight(.black))
+                        .foregroundStyle(AdminTheme.ink)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(.white.opacity(0.90), in: Capsule())
                 }
-                .padding(7)
-                VStack {
+                Spacer()
+            }
+            .padding(7)
+            VStack {
+                Spacer()
+                HStack {
+                    Label("\(planeAnchorCount)", systemImage: "square.split.diagonal.2x2")
+                        .font(.caption2.weight(.black))
+                        .foregroundStyle(AdminTheme.mutedInk)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(.white.opacity(0.88), in: Capsule())
                     Spacer()
-                    HStack {
-                        Label("\(planeAnchorCount)", systemImage: "square.split.diagonal.2x2")
+                    if meshAnchorCount == 0 && !spatialPoints.isEmpty {
+                        Text("메시 대기")
                             .font(.caption2.weight(.black))
-                            .foregroundStyle(AdminTheme.mutedInk)
+                            .foregroundStyle(AdminTheme.caution)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 4)
                             .background(.white.opacity(0.88), in: Capsule())
-                        Spacer()
                     }
                 }
-                .padding(7)
             }
+            .padding(7)
         }
         .shadow(color: .black.opacity(0.16), radius: 10, x: 0, y: 5)
-    }
-
-    private func grid(in size: CGSize) -> Path {
-        Path { path in
-            for ratio in [0.33, 0.66] {
-                let x = size.width * ratio
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: size.height))
-                let y = size.height * ratio
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-            }
-        }
-    }
-
-    private func point(for item: Vector3Value, in size: CGSize) -> CGPoint {
-        let reference = path + spatialPoints
-        let xs = reference.map { Double($0.x) }
-        let zs = reference.map { Double($0.z) }
-        let minX = xs.min() ?? 0
-        let maxX = xs.max() ?? 1
-        let minZ = zs.min() ?? 0
-        let maxZ = zs.max() ?? 1
-        let padding = 14.0
-        let width = max(size.width - padding * 2, 1)
-        let height = max(size.height - padding * 2, 1)
-        let normalizedX = (Double(item.x) - minX) / max(maxX - minX, 1)
-        let normalizedZ = (Double(item.z) - minZ) / max(maxZ - minZ, 1)
-        return CGPoint(
-            x: size.width - padding - normalizedX * width,
-            y: size.height - padding - normalizedZ * height
-        )
-    }
-
-    private func pointColor(_ item: Vector3Value) -> Color {
-        if item.y < -0.35 { return AdminTheme.route.opacity(0.72) }
-        if item.y > 0.75 { return AdminTheme.caution.opacity(0.74) }
-        return AdminTheme.safe.opacity(0.74)
     }
 
     private func compactCount(_ value: Int) -> String {
@@ -2203,6 +2151,203 @@ private struct MiniSpatialScanMap: View {
         }
         return "\(value)"
     }
+}
+
+private struct MiniSpatialSceneView: UIViewRepresentable {
+    let path: [Vector3Value]
+    let spatialPoints: [Vector3Value]
+    let headingDegrees: Double
+    let hasMesh: Bool
+
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView(frame: .zero)
+        view.backgroundColor = .clear
+        view.allowsCameraControl = false
+        view.autoenablesDefaultLighting = false
+        view.isUserInteractionEnabled = false
+        view.antialiasingMode = .multisampling4X
+        return view
+    }
+
+    func updateUIView(_ view: SCNView, context: Context) {
+        let scene = makeScene()
+        view.scene = scene
+        view.pointOfView = scene.rootNode.childNode(withName: "mini-camera", recursively: false)
+    }
+
+    private func makeScene() -> SCNScene {
+        let scene = SCNScene()
+        scene.background.contents = UIColor.clear
+        let reference = Array((path + spatialPoints).suffix(360))
+        let bounds = SpatialBounds(points: reference)
+        let root = SCNNode()
+        scene.rootNode.addChildNode(root)
+
+        addLights(to: scene)
+        addGrid(to: root, bounds: bounds)
+        addSpatialPoints(to: root, bounds: bounds)
+        addPath(to: root, bounds: bounds)
+        addCurrentPose(to: root, bounds: bounds)
+        addCamera(to: scene, bounds: bounds)
+
+        return scene
+    }
+
+    private func addLights(to scene: SCNScene) {
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light?.type = .ambient
+        ambient.light?.intensity = 520
+        scene.rootNode.addChildNode(ambient)
+
+        let key = SCNNode()
+        key.light = SCNLight()
+        key.light?.type = .directional
+        key.light?.intensity = 820
+        key.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
+        scene.rootNode.addChildNode(key)
+    }
+
+    private func addCamera(to scene: SCNScene, bounds: SpatialBounds) {
+        let camera = SCNNode()
+        camera.camera = SCNCamera()
+        camera.camera?.usesOrthographicProjection = true
+        camera.camera?.orthographicScale = max(Double(bounds.radius) * 2.45, 2.4)
+        camera.name = "mini-camera"
+        camera.position = SCNVector3(0, max(bounds.radius * 1.25, 2.2), max(bounds.radius * 1.85, 3.0))
+        camera.eulerAngles = SCNVector3(-Float.pi * 0.34, 0, 0)
+        scene.rootNode.addChildNode(camera)
+    }
+
+    private func addGrid(to root: SCNNode, bounds: SpatialBounds) {
+        let extent = max(bounds.radius, 1.2)
+        let floorY = bounds.floorY - 0.02
+        let material = lineMaterial(UIColor(white: 1.0, alpha: 0.45))
+        let steps = 4
+        for index in -steps...steps {
+            let offset = Float(index) * extent / Float(steps)
+            root.addChildNode(lineNode(
+                from: SCNVector3(-extent, floorY, offset),
+                to: SCNVector3(extent, floorY, offset),
+                material: material
+            ))
+            root.addChildNode(lineNode(
+                from: SCNVector3(offset, floorY, -extent),
+                to: SCNVector3(offset, floorY, extent),
+                material: material
+            ))
+        }
+    }
+
+    private func addSpatialPoints(to root: SCNNode, bounds: SpatialBounds) {
+        let points = Array(spatialPoints.prefix(hasMesh ? 260 : 140))
+        guard !points.isEmpty else { return }
+        let radius: CGFloat = hasMesh ? 0.025 : 0.018
+        for point in points {
+            let sphere = SCNSphere(radius: radius)
+            sphere.segmentCount = 8
+            sphere.firstMaterial = pointMaterial(for: point, hasMesh: hasMesh)
+            let node = SCNNode(geometry: sphere)
+            node.position = bounds.scenePoint(point)
+            root.addChildNode(node)
+        }
+    }
+
+    private func addPath(to root: SCNNode, bounds: SpatialBounds) {
+        guard path.count >= 2 else { return }
+        let material = lineMaterial(UIColor(red: 0.42, green: 0.32, blue: 1.0, alpha: 1.0))
+        let points = path.map { bounds.scenePoint($0) }
+        for pair in zip(points, points.dropFirst()) {
+            root.addChildNode(lineNode(from: pair.0, to: pair.1, material: material))
+        }
+    }
+
+    private func addCurrentPose(to root: SCNNode, bounds: SpatialBounds) {
+        guard let current = path.last else { return }
+        let cone = SCNCone(topRadius: 0, bottomRadius: 0.11, height: 0.28)
+        cone.firstMaterial = material(UIColor(red: 0.42, green: 0.32, blue: 1.0, alpha: 1.0), emission: 0.18)
+        let node = SCNNode(geometry: cone)
+        node.position = bounds.scenePoint(current) + SCNVector3(0, 0.10, 0)
+        node.eulerAngles = SCNVector3(Float.pi / 2, Float(-headingDegrees * .pi / 180), 0)
+        root.addChildNode(node)
+    }
+
+    private func lineNode(from: SCNVector3, to: SCNVector3, material: SCNMaterial) -> SCNNode {
+        let source = SCNGeometrySource(vertices: [from, to])
+        let indices: [Int32] = [0, 1]
+        let data = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(data: data, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [material]
+        return SCNNode(geometry: geometry)
+    }
+
+    private func pointMaterial(for point: Vector3Value, hasMesh: Bool) -> SCNMaterial {
+        if !hasMesh {
+            return material(UIColor(red: 0.47, green: 0.40, blue: 0.96, alpha: 0.70), emission: 0.08)
+        }
+        if point.y < -0.22 {
+            return material(UIColor(red: 0.05, green: 0.55, blue: 0.95, alpha: 0.82), emission: 0.10)
+        }
+        if point.y > 0.85 {
+            return material(UIColor(red: 1.0, green: 0.56, blue: 0.12, alpha: 0.86), emission: 0.10)
+        }
+        return material(UIColor(red: 0.06, green: 0.70, blue: 0.43, alpha: 0.82), emission: 0.10)
+    }
+
+    private func lineMaterial(_ color: UIColor) -> SCNMaterial {
+        material(color, emission: 0.05)
+    }
+
+    private func material(_ color: UIColor, emission: CGFloat) -> SCNMaterial {
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.emission.contents = color.withAlphaComponent(emission)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        return material
+    }
+}
+
+private struct SpatialBounds {
+    let centerX: Float
+    let centerY: Float
+    let centerZ: Float
+    let radius: Float
+    let floorY: Float
+
+    init(points: [Vector3Value]) {
+        guard !points.isEmpty else {
+            centerX = 0
+            centerY = 0
+            centerZ = 0
+            radius = 1.4
+            floorY = -0.04
+            return
+        }
+        let xs = points.map(\.x)
+        let ys = points.map(\.y)
+        let zs = points.map(\.z)
+        let minX = xs.min() ?? 0
+        let maxX = xs.max() ?? 1
+        let minY = ys.min() ?? 0
+        let maxY = ys.max() ?? 1
+        let minZ = zs.min() ?? 0
+        let maxZ = zs.max() ?? 1
+        centerX = (minX + maxX) / 2
+        centerY = (minY + maxY) / 2
+        centerZ = (minZ + maxZ) / 2
+        radius = max(max(maxX - minX, maxZ - minZ), maxY - minY) / 2 + 0.55
+        floorY = minY - centerY
+    }
+
+    func scenePoint(_ point: Vector3Value) -> SCNVector3 {
+        SCNVector3(point.x - centerX, point.y - centerY, point.z - centerZ)
+    }
+}
+
+private func + (lhs: SCNVector3, rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z)
 }
 
 private struct PrePublishChecklist: View {

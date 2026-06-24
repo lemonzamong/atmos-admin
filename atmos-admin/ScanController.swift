@@ -1026,11 +1026,14 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
 
     private func scanCompletionFailures(samples: [PoseSampleValue], totalDistance: Double) -> [String] {
         var failures: [String] = []
-        if samples.count < 12 {
-            failures.append("정확한 지도를 만들 표본이 부족합니다. 시작점을 다시 잡고 5초 이상 천천히 스캔해 주세요.")
+        if samples.count < 24 {
+            failures.append("정확한 삼차원 지도를 만들 표본이 부족합니다. 시작점을 다시 잡고 10초 이상 천천히 스캔해 주세요.")
         }
-        if capturedKeyframes.count < 12 {
-            failures.append("삼차원 재구성용 핵심 화면이 부족합니다. 문, 표지판, 벽면, 바닥 경계, 엘리베이터, 계단을 더 오래 훑어 주세요.")
+        if capturedKeyframes.count < 20 {
+            failures.append("삼차원 재구성용 핵심 화면이 부족합니다. 벽, 바닥, 문, 표지판, 코너를 여러 각도에서 더 오래 훑어 주세요.")
+        }
+        if spatialPreviewPoints.count < 40 {
+            failures.append("공간 구조점이 부족합니다. 바닥만 찍지 말고 벽과 바닥이 함께 보이게 천천히 훑어 주세요.")
         }
         if normalTrackingRatio < 0.70 {
             failures.append("추적이 자주 불안정했습니다. 흰 벽보다 특징이 많은 벽면을 보며 다시 스캔해 주세요.")
@@ -1041,8 +1044,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if trackingJumpCount > max(3, samples.count / 12) {
             failures.append("스캔 중 위치 점프가 많았습니다. 급회전 없이 천천히 다시 스캔해 주세요.")
         }
-        if totalDistance < 3.0 {
-            failures.append("이동 거리가 너무 짧습니다. 보행 경로를 따라 3미터 이상 이동한 뒤 끝내 주세요.")
+        if totalDistance < 8.0 {
+            failures.append("이동 거리가 너무 짧습니다. 보행 경로를 따라 8미터 이상 이동한 뒤 끝내 주세요.")
         }
         return failures
     }
