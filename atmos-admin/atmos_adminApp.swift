@@ -1,32 +1,12 @@
-//
-//  atmos_adminApp.swift
-//  atmos-admin
-//
-//  Created by hyeokjun on 6/18/26.
-//
-
 import SwiftUI
-import SwiftData
 
 @main
 struct atmos_adminApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @UIApplicationDelegateAdaptor(AdminAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(sharedModelContainer)
     }
 }
