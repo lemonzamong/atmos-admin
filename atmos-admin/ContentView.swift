@@ -941,6 +941,7 @@ struct ContentView: View {
                 path: scanner.scanPath,
                 spatialPoints: scanner.spatialPreviewPoints,
                 headingDegrees: scanner.currentMapHeadingDegrees,
+                supportsMeshReconstruction: scanner.supportsMeshReconstruction,
                 meshAnchorCount: scanner.meshAnchorCount,
                 planeAnchorCount: scanner.planeAnchorCount,
                 meshVertexCount: scanner.meshVertexCount
@@ -948,7 +949,7 @@ struct ContentView: View {
             .frame(width: scanner.status == .scanning ? 178 : 148, height: scanner.status == .scanning ? 154 : 128)
         }
         .opacity(scanner.status == .scanning || !scanner.scanPath.isEmpty || !scanner.spatialPreviewPoints.isEmpty ? 1 : 0)
-        .accessibilityLabel("현재 스캔 영역, 공간 메시 프리뷰, 품질 점수, 지도 방향")
+        .accessibilityLabel("현재 스캔 영역, 카메라 구조점 프리뷰, 품질 점수, 지도 방향")
     }
 
     private func scanMetric(_ title: String, _ value: String, _ symbol: String) -> some View {
@@ -2070,6 +2071,7 @@ private struct MiniSpatialScanMap: View {
     let path: [Vector3Value]
     let spatialPoints: [Vector3Value]
     let headingDegrees: Double
+    let supportsMeshReconstruction: Bool
     let meshAnchorCount: Int
     let planeAnchorCount: Int
     let meshVertexCount: Int
@@ -2103,7 +2105,7 @@ private struct MiniSpatialScanMap: View {
 
             VStack {
                 HStack {
-                    Text(meshAnchorCount > 0 ? "메시 \(compactCount(meshVertexCount))" : "구조점 \(spatialPoints.count)")
+                    Text(primaryStatusText)
                         .font(.caption2.weight(.black))
                         .foregroundStyle(meshAnchorCount > 0 ? AdminTheme.safe : AdminTheme.violet)
                         .padding(.horizontal, 7)
@@ -2131,9 +2133,9 @@ private struct MiniSpatialScanMap: View {
                         .background(.white.opacity(0.88), in: Capsule())
                     Spacer()
                     if meshAnchorCount == 0 && !spatialPoints.isEmpty {
-                        Text("메시 대기")
+                        Text(supportsMeshReconstruction ? "표면 수집" : "서버 재구성")
                             .font(.caption2.weight(.black))
-                            .foregroundStyle(AdminTheme.caution)
+                            .foregroundStyle(supportsMeshReconstruction ? AdminTheme.caution : AdminTheme.violet)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 4)
                             .background(.white.opacity(0.88), in: Capsule())
@@ -2143,6 +2145,16 @@ private struct MiniSpatialScanMap: View {
             .padding(7)
         }
         .shadow(color: .black.opacity(0.16), radius: 10, x: 0, y: 5)
+    }
+
+    private var primaryStatusText: String {
+        if meshAnchorCount > 0 {
+            return "표면 \(compactCount(meshVertexCount))"
+        }
+        if supportsMeshReconstruction {
+            return "구조점 \(spatialPoints.count)"
+        }
+        return "카메라 \(spatialPoints.count)"
     }
 
     private func compactCount(_ value: Int) -> String {

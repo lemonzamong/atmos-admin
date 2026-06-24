@@ -55,6 +55,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published private(set) var coverageSpanMeters = 0.0
     @Published private(set) var scanPath: [Vector3Value] = []
     @Published private(set) var spatialPreviewPoints: [Vector3Value] = []
+    @Published private(set) var supportsMeshReconstruction = false
     @Published private(set) var meshAnchorCount = 0
     @Published private(set) var planeAnchorCount = 0
     @Published private(set) var meshVertexCount = 0
@@ -142,6 +143,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         coverageSpanMeters = 0
         scanPath.removeAll(keepingCapacity: true)
         spatialPreviewPoints.removeAll(keepingCapacity: true)
+        supportsMeshReconstruction = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         meshAnchorCount = 0
         planeAnchorCount = 0
         meshVertexCount = 0
@@ -184,7 +186,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             configuration.frameSemantics.insert(.smoothedSceneDepth)
         }
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+        if supportsMeshReconstruction {
             configuration.sceneReconstruction = .mesh
         }
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
