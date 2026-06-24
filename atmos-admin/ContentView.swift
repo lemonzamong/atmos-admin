@@ -1075,6 +1075,8 @@ struct ContentView: View {
                     reviewStat("목적지", "\(semanticReviewNodes(in: graph).count)", AdminTheme.violet)
                     reviewStat("경로", "\(routeWaypointCount(in: graph))", AdminTheme.route)
                 }
+                DigitalTwinPreview(graph: graph)
+                    .frame(height: 340)
                 ReviewMapOverview(graph: graph)
                     .frame(height: 300)
                 aiReviewSummary(graph)
@@ -1892,6 +1894,270 @@ private struct MapCandidateMarker: View {
     }
 }
 
+private struct DigitalTwinPreview: View {
+    let graph: SceneGraphValue
+
+    private var renderableNodes: [SceneGraphNodeValue] {
+        graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
+    }
+
+    private var routeCount: Int {
+        renderableNodes.filter { $0.id.hasPrefix("trajectory:") }.count
+    }
+
+    private var pointCount: Int {
+        renderableNodes.filter { $0.kind == "space_sample" }.count
+    }
+
+    private var objectCount: Int {
+        renderableNodes.filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "space_sample" }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("3D 디지털트윈", systemImage: "cube.transparent.fill")
+                    .font(.headline.weight(.black))
+                    .foregroundStyle(AdminTheme.ink)
+                Spacer()
+                Text("경로 \(routeCount) · 점군 \(pointCount) · 태그 \(objectCount)")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AdminTheme.mutedInk)
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(Color(red: 0.955, green: 0.965, blue: 0.990))
+                if renderableNodes.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "clock.fill")
+                            .font(.title2.weight(.black))
+                        Text("서버 3D 재구성 대기 중")
+                            .font(.headline.weight(.black))
+                        Text("AI 처리가 끝나면 이곳에 디지털트윈이 렌더링됩니다.")
+                            .font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(AdminTheme.mutedInk)
+                    .multilineTextAlignment(.center)
+                    .padding()
+                } else {
+                    DigitalTwinSceneView(graph: graph)
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                }
+                VStack {
+                    HStack {
+                        Spacer()
+                        Text("드래그 회전")
+                            .font(.caption2.weight(.black))
+                            .foregroundStyle(AdminTheme.ink)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(.white.opacity(0.88), in: Capsule())
+                    }
+                    Spacer()
+                }
+                .padding(10)
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(.white.opacity(0.78), lineWidth: 1))
+        .shadow(color: AdminTheme.shadow(0.08), radius: 18, y: 9)
+    }
+}
+
+private struct DigitalTwinSceneView: UIViewRepresentable {
+    let graph: SceneGraphValue
+
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView(frame: .zero)
+        view.backgroundColor = UIColor.clear
+        view.allowsCameraControl = true
+        view.autoenablesDefaultLighting = false
+        view.antialiasingMode = .multisampling4X
+        return view
+    }
+
+    func updateUIView(_ view: SCNView, context: Context) {
+        let scene = makeScene()
+        view.scene = scene
+        view.pointOfView = scene.rootNode.childNode(withName: "digital-twin-camera", recursively: false)
+    }
+
+    private func makeScene() -> SCNScene {
+        let scene = SCNScene()
+        scene.background.contents = UIColor.clear
+        let visibleNodes = graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
+        let bounds = SpatialBounds(points: visibleNodes.map(\.geometry.center))
+        let root = SCNNode()
+        scene.rootNode.addChildNode(root)
+
+        addLights(to: scene)
+        addGrid(to: root, bounds: bounds)
+        addPointCloud(to: root, nodes: visibleNodes, bounds: bounds)
+        addRelations(to: root, nodes: visibleNodes, bounds: bounds)
+        addRoute(to: root, nodes: visibleNodes, bounds: bounds)
+        addSemanticNodes(to: root, nodes: visibleNodes, bounds: bounds)
+        addCamera(to: scene, bounds: bounds)
+
+        return scene
+    }
+
+    private func addLights(to scene: SCNScene) {
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light?.type = .ambient
+        ambient.light?.intensity = 620
+        scene.rootNode.addChildNode(ambient)
+
+        let key = SCNNode()
+        key.light = SCNLight()
+        key.light?.type = .directional
+        key.light?.intensity = 920
+        key.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 5, 0)
+        scene.rootNode.addChildNode(key)
+    }
+
+    private func addCamera(to scene: SCNScene, bounds: SpatialBounds) {
+        let camera = SCNNode()
+        camera.name = "digital-twin-camera"
+        camera.camera = SCNCamera()
+        camera.camera?.usesOrthographicProjection = true
+        camera.camera?.orthographicScale = max(Double(bounds.radius) * 2.7, 4.2)
+        camera.position = SCNVector3(0, max(bounds.radius * 1.45, 3.2), max(bounds.radius * 2.05, 4.8))
+        camera.eulerAngles = SCNVector3(-Float.pi * 0.36, 0, 0)
+        scene.rootNode.addChildNode(camera)
+    }
+
+    private func addGrid(to root: SCNNode, bounds: SpatialBounds) {
+        let extent = max(bounds.radius, 2.0)
+        let floorY = bounds.floorY - 0.03
+        let material = lineMaterial(UIColor(white: 1, alpha: 0.56))
+        for index in -6...6 {
+            let offset = Float(index) * extent / 6
+            root.addChildNode(lineNode(from: SCNVector3(-extent, floorY, offset), to: SCNVector3(extent, floorY, offset), material: material))
+            root.addChildNode(lineNode(from: SCNVector3(offset, floorY, -extent), to: SCNVector3(offset, floorY, extent), material: material))
+        }
+    }
+
+    private func addPointCloud(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+        let samples = nodes.filter { $0.kind == "space_sample" }
+        for node in samples.prefix(320) {
+            let sphere = SCNSphere(radius: 0.025)
+            sphere.segmentCount = 8
+            sphere.firstMaterial = material(UIColor(red: 0.34, green: 0.28, blue: 1.0, alpha: 0.66), emission: 0.18)
+            let point = SCNNode(geometry: sphere)
+            point.position = bounds.scenePoint(node.geometry.center)
+            point.opacity = 0.82
+            point.runAction(.repeatForever(.sequence([
+                .fadeOpacity(to: 0.35, duration: 0.9),
+                .fadeOpacity(to: 0.9, duration: 0.9)
+            ])))
+            root.addChildNode(point)
+        }
+    }
+
+    private func addRoute(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+        let route = nodes
+            .filter { $0.id.hasPrefix("trajectory:") }
+            .sorted { trajectoryIndex($0.id) < trajectoryIndex($1.id) }
+        guard route.count >= 2 else { return }
+        let routeMaterial = lineMaterial(UIColor(red: 0.28, green: 0.20, blue: 0.86, alpha: 1.0))
+        let points = route.map { bounds.scenePoint($0.geometry.center) + SCNVector3(0, 0.035, 0) }
+        for pair in zip(points, points.dropFirst()) {
+            root.addChildNode(lineNode(from: pair.0, to: pair.1, material: routeMaterial))
+        }
+        for node in route {
+            let sphere = SCNSphere(radius: 0.055)
+            sphere.segmentCount = 12
+            sphere.firstMaterial = material(UIColor(red: 0.28, green: 0.20, blue: 0.86, alpha: 1.0), emission: 0.12)
+            let marker = SCNNode(geometry: sphere)
+            marker.position = bounds.scenePoint(node.geometry.center) + SCNVector3(0, 0.055, 0)
+            root.addChildNode(marker)
+        }
+    }
+
+    private func addRelations(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+        let nodeByID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        for relation in graph.relations where relation.reviewStatus != "rejected" && relation.predicate != "scan_path_connected" {
+            guard let source = nodeByID[relation.sourceId], let target = nodeByID[relation.targetId] else { continue }
+            let color = relation.attributes["accessible"] == "false"
+                ? UIColor(red: 0.95, green: 0.23, blue: 0.18, alpha: 0.66)
+                : UIColor(red: 0.08, green: 0.67, blue: 0.44, alpha: 0.62)
+            root.addChildNode(lineNode(
+                from: bounds.scenePoint(source.geometry.center) + SCNVector3(0, 0.09, 0),
+                to: bounds.scenePoint(target.geometry.center) + SCNVector3(0, 0.09, 0),
+                material: lineMaterial(color)
+            ))
+        }
+    }
+
+    private func addSemanticNodes(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+        let semanticNodes = nodes
+            .filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "space_sample" }
+            .prefix(36)
+        for node in semanticNodes {
+            let color = color(for: node)
+            let box = SCNBox(width: 0.22, height: 0.16, length: 0.22, chamferRadius: 0.035)
+            box.firstMaterial = material(color, emission: 0.14)
+            let marker = SCNNode(geometry: box)
+            marker.position = bounds.scenePoint(node.geometry.center) + SCNVector3(0, 0.16, 0)
+            root.addChildNode(marker)
+
+            if let label = node.labels.first, !label.isEmpty {
+                let text = SCNText(string: label, extrusionDepth: 0.004)
+                text.font = UIFont.systemFont(ofSize: 0.18, weight: .bold)
+                text.flatness = 0.2
+                text.firstMaterial = material(UIColor(white: 0.05, alpha: 1.0), emission: 0)
+                let textNode = SCNNode(geometry: text)
+                textNode.scale = SCNVector3(0.28, 0.28, 0.28)
+                textNode.position = marker.position + SCNVector3(-0.18, 0.18, 0)
+                textNode.constraints = [SCNBillboardConstraint()]
+                root.addChildNode(textNode)
+            }
+        }
+    }
+
+    private func color(for node: SceneGraphNodeValue) -> UIColor {
+        if node.attributes["hazard"] == "true" {
+            return UIColor(red: 0.95, green: 0.23, blue: 0.18, alpha: 0.92)
+        }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" {
+            return UIColor(red: 1.0, green: 0.58, blue: 0.12, alpha: 0.92)
+        }
+        if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" {
+            return UIColor(red: 0.08, green: 0.67, blue: 0.44, alpha: 0.92)
+        }
+        return UIColor(red: 0.32, green: 0.25, blue: 0.86, alpha: 0.9)
+    }
+
+    private func lineNode(from: SCNVector3, to: SCNVector3, material: SCNMaterial) -> SCNNode {
+        let source = SCNGeometrySource(vertices: [from, to])
+        let indices: [Int32] = [0, 1]
+        let data = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(data: data, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [material]
+        return SCNNode(geometry: geometry)
+    }
+
+    private func lineMaterial(_ color: UIColor) -> SCNMaterial {
+        material(color, emission: 0.05)
+    }
+
+    private func material(_ color: UIColor, emission: CGFloat) -> SCNMaterial {
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.emission.contents = color.withAlphaComponent(emission)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        return material
+    }
+
+    private func trajectoryIndex(_ id: String) -> Int {
+        Int(id.split(separator: ":").last ?? "") ?? 0
+    }
+}
+
 private struct EditableGraphMap: View {
     let graph: SceneGraphValue
     let onMove: (_ node: SceneGraphNodeValue, _ center: Vector3Value) -> Void
@@ -2084,7 +2350,7 @@ private struct MiniSpatialScanMap: View {
                 path: path,
                 spatialPoints: spatialPoints,
                 headingDegrees: headingDegrees,
-                hasMesh: meshAnchorCount > 0
+                hasMesh: false
             )
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
