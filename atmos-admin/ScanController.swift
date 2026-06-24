@@ -54,6 +54,10 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published private(set) var keyframeCount = 0
     @Published private(set) var coverageSpanMeters = 0.0
     @Published private(set) var scanPath: [Vector3Value] = []
+    @Published private(set) var spatialPreviewPoints: [Vector3Value] = []
+    @Published private(set) var meshAnchorCount = 0
+    @Published private(set) var planeAnchorCount = 0
+    @Published private(set) var meshVertexCount = 0
     @Published private(set) var currentMapHeadingDegrees = 0.0
     @Published private(set) var mapNorthDegrees = 0.0
     @Published private(set) var isRecordingPath = false
@@ -93,7 +97,10 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private var currentSessionID = UUID()
     private var lastKeyframeTime: TimeInterval = -.infinity
     private var lastKeyframePosition: SIMD3<Float>?
+    private var lastKeyframeRotation: simd_quatf?
     private var maxKeyframeCount = 72
+    private var meshAnchors: [UUID: ARMeshAnchor] = [:]
+    private var planeAnchors: [UUID: ARPlaneAnchor] = [:]
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private let apiClient = AdminAPIClient()
     private let motion = CMMotionManager()
@@ -134,6 +141,12 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         keyframeCount = 0
         coverageSpanMeters = 0
         scanPath.removeAll(keepingCapacity: true)
+        spatialPreviewPoints.removeAll(keepingCapacity: true)
+        meshAnchorCount = 0
+        planeAnchorCount = 0
+        meshVertexCount = 0
+        meshAnchors.removeAll(keepingCapacity: true)
+        planeAnchors.removeAll(keepingCapacity: true)
         currentMapHeadingDegrees = 0
         mapNorthDegrees = 0
         isRecordingPath = false
@@ -146,7 +159,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         hasCapturedNorthOffset = false
         lastKeyframeTime = -.infinity
         lastKeyframePosition = nil
-        maxKeyframeCount = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) ? 48 : 72
+        lastKeyframeRotation = nil
+        maxKeyframeCount = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) ? 72 : 96
         previousPosition = nil
         previousSamplePosition = nil
         previousSampleRotation = nil
@@ -157,7 +171,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         stableTrackingStartTime = nil
         observedFrameCount = 0
         completedManifest = nil
-        message = "먼저 제자리에서 문, 표지판, 벽 모서리를 1초 정도 비춰 주세요."
+        message = "먼저 제자리에서 문, 표지판, 벽 모서리, 바닥 경계를 천천히 훑어 주세요."
         startedAt = Date()
         startMotionHeadingUpdates()
         startLocationUpdates()
@@ -166,6 +180,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         configuration.worldAlignment = .gravity
         configuration.planeDetection = [.horizontal, .vertical]
         configuration.isAutoFocusEnabled = true
+        configuration.environmentTexturing = .automatic
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             configuration.frameSemantics.insert(.smoothedSceneDepth)
         }
@@ -213,7 +228,14 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             supportsSceneDepth: ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth),
             totalDistanceM: finalizedDistance,
             samples: finalizedSamples,
-            keyframes: capturedKeyframes.map(\.metadata)
+            keyframes: capturedKeyframes.map(\.metadata),
+            spatialSamples: Array(spatialPreviewPoints.prefix(300)),
+            meshAnchorCount: meshAnchorCount,
+            planeAnchorCount: planeAnchorCount,
+            meshVertexCount: meshVertexCount,
+            datasetSchemaVersion: 1,
+            capturePurpose: "indoor_navigation_physical_ai_dataset",
+            privacyMode: "avoid_people_faces_documents"
         )
         samples = finalizedSamples
         totalDistance = finalizedDistance
@@ -275,6 +297,10 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         currentAmbientIntensity = manifest.samples.compactMap(\.ambientIntensity).last ?? 0
         scanStabilityScore = manifest.samples.compactMap(\.trackingQuality).last ?? normalTrackingRatio
         keyframeCount = manifest.keyframes.count
+        spatialPreviewPoints = manifest.spatialSamples ?? []
+        meshAnchorCount = manifest.meshAnchorCount ?? 0
+        planeAnchorCount = manifest.planeAnchorCount ?? 0
+        meshVertexCount = manifest.meshVertexCount ?? 0
         scanLatitude = manifest.latitude
         scanLongitude = manifest.longitude
         scanHorizontalAccuracyM = manifest.horizontalAccuracyM
@@ -701,10 +727,10 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                     previousSamplePosition = position
                     previousSampleRotation = quaternion
                     previousSampleTimestamp = frame.timestamp
-                    message = "초기 기준점이 잡혔습니다. 이제 복도 중심을 따라 천천히 이동해 주세요."
+                    message = "초기 기준점이 잡혔습니다. 이제 복도 중심을 따라 천천히 이동하며 벽과 바닥을 함께 훑어 주세요."
                     captureKeyframeIfNeeded(frame: frame, position: position, trackingState: trackingState, trackingQuality: trackingQuality)
                 } else {
-                    message = "초기 기준점 잡는 중입니다. 휴대폰을 천천히 들고 문, 표지판, 모서리를 비춰 주세요."
+                    message = "초기 기준점 잡는 중입니다. 휴대폰을 천천히 들고 문, 표지판, 모서리, 바닥 경계를 비춰 주세요."
                     previousSamplePosition = position
                     previousSampleRotation = quaternion
                     previousSampleTimestamp = frame.timestamp
@@ -712,7 +738,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             } else {
                 stableTrackingStartTime = nil
                 rejectedFrameCount += 1
-                message = "아직 기준점이 불안정합니다. 흰 벽보다 문, 표지판, 모서리를 비춰 주세요."
+                message = "아직 기준점이 불안정합니다. 흰 벽보다 문, 표지판, 모서리, 바닥 경계를 비춰 주세요."
                 previousSamplePosition = position
                 previousSampleRotation = quaternion
                 previousSampleTimestamp = frame.timestamp
@@ -772,6 +798,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         self.previousPosition = position
         updateCoverage(with: position)
         appendScanPath(position)
+        updateFeaturePointPreviewIfNeeded(frame: frame)
 
         samples.append(
             PoseSampleValue(
@@ -814,6 +841,73 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         previousSampleRotation = quaternion
         previousSampleTimestamp = frame.timestamp
         captureKeyframeIfNeeded(frame: frame, position: position, trackingState: trackingState, trackingQuality: trackingQuality)
+    }
+
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        updateSpatialAnchors(anchors)
+    }
+
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        updateSpatialAnchors(anchors)
+    }
+
+    private func updateSpatialAnchors(_ anchors: [ARAnchor]) {
+        guard status == .scanning else { return }
+        var changed = false
+        for anchor in anchors {
+            if let mesh = anchor as? ARMeshAnchor {
+                meshAnchors[mesh.identifier] = mesh
+                changed = true
+            } else if let plane = anchor as? ARPlaneAnchor {
+                planeAnchors[plane.identifier] = plane
+                changed = true
+            }
+        }
+        guard changed else { return }
+        rebuildSpatialPreview()
+    }
+
+    private func rebuildSpatialPreview() {
+        meshAnchorCount = meshAnchors.count
+        planeAnchorCount = planeAnchors.count
+        meshVertexCount = meshAnchors.values.reduce(0) { $0 + $1.geometry.vertices.count }
+
+        var points: [Vector3Value] = []
+        for anchor in meshAnchors.values.prefix(16) {
+            let vertices = anchor.geometry.vertices
+            let step = max(vertices.count / 28, 1)
+            var index = 0
+            while index < vertices.count && points.count < 240 {
+                let local = vertices.vertex(at: index)
+                let world = anchor.transform * SIMD4<Float>(local.x, local.y, local.z, 1)
+                points.append(Vector3Value(x: world.x, y: world.y, z: world.z))
+                index += step
+            }
+        }
+
+        for anchor in planeAnchors.values.prefix(20) {
+            let center = anchor.transform * SIMD4<Float>(anchor.center.x, anchor.center.y, anchor.center.z, 1)
+            points.append(Vector3Value(x: center.x, y: center.y, z: center.z))
+        }
+
+        if !points.isEmpty {
+            spatialPreviewPoints = points
+        }
+    }
+
+    private func updateFeaturePointPreviewIfNeeded(frame: ARFrame) {
+        guard meshAnchors.isEmpty, let featurePoints = frame.rawFeaturePoints?.points, !featurePoints.isEmpty else { return }
+        let step = max(featurePoints.count / 90, 1)
+        var points: [Vector3Value] = []
+        var index = 0
+        while index < featurePoints.count && points.count < 120 {
+            let point = featurePoints[index]
+            points.append(Vector3Value(x: point.x, y: point.y, z: point.z))
+            index += step
+        }
+        if !points.isEmpty {
+            spatialPreviewPoints = points
+        }
     }
 
     private func instantaneousSpeed(position: SIMD3<Float>, timestamp: TimeInterval) -> Double {
@@ -931,8 +1025,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if samples.count < 12 {
             failures.append("정확한 지도를 만들 표본이 부족합니다. 시작점을 다시 잡고 5초 이상 천천히 스캔해 주세요.")
         }
-        if capturedKeyframes.count < 5 {
-            failures.append("핵심 화면이 부족합니다. 문, 표지판, 엘리베이터, 계단을 화면 중앙에 더 담아 주세요.")
+        if capturedKeyframes.count < 12 {
+            failures.append("삼차원 재구성용 핵심 화면이 부족합니다. 문, 표지판, 벽면, 바닥 경계, 엘리베이터, 계단을 더 오래 훑어 주세요.")
         }
         if normalTrackingRatio < 0.70 {
             failures.append("추적이 자주 불안정했습니다. 흰 벽보다 특징이 많은 벽면을 보며 다시 스캔해 주세요.")
@@ -943,8 +1037,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if trackingJumpCount > max(3, samples.count / 12) {
             failures.append("스캔 중 위치 점프가 많았습니다. 급회전 없이 천천히 다시 스캔해 주세요.")
         }
-        if totalDistance < 1.8 {
-            failures.append("이동 거리가 너무 짧습니다. 보행 경로를 따라 조금 더 이동한 뒤 끝내 주세요.")
+        if totalDistance < 3.0 {
+            failures.append("이동 거리가 너무 짧습니다. 보행 경로를 따라 3미터 이상 이동한 뒤 끝내 주세요.")
         }
         return failures
     }
@@ -1097,21 +1191,27 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     ) {
         guard capturedKeyframes.count < maxKeyframeCount else { return }
         let supportsDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
-        let minInterval = supportsDepth ? 1.2 : 0.65
-        let minDistance: Float = supportsDepth ? 0.65 : 0.32
-        let minQuality = supportsDepth ? 0.68 : 0.62
+        let minInterval = supportsDepth ? 0.85 : 0.42
+        let minDistance: Float = supportsDepth ? 0.45 : 0.20
+        let minRotationDegrees = supportsDepth ? 16.0 : 10.0
+        let minQuality = supportsDepth ? 0.64 : 0.58
         guard trackingState == "normal", trackingQuality >= minQuality, frame.timestamp - lastKeyframeTime >= minInterval else { return }
-        if let lastKeyframePosition, simd_distance(lastKeyframePosition, position) < minDistance { return }
+        let rotation = simd_quatf(frame.camera.transform)
+        if let lastKeyframePosition, let lastKeyframeRotation {
+            let movedEnough = simd_distance(lastKeyframePosition, position) >= minDistance
+            let rotatedEnough = angularDistanceDegrees(lastKeyframeRotation, rotation) >= minRotationDegrees
+            if !movedEnough && !rotatedEnough { return }
+        }
 
         let source = CIImage(cvPixelBuffer: frame.capturedImage)
-        let targetMaxDimension: CGFloat = supportsDepth ? 1280 : 1024
+        let targetMaxDimension: CGFloat = supportsDepth ? 1440 : 1280
         let scale = min(1, targetMaxDimension / max(source.extent.width, source.extent.height))
         let image = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let data = imageContext.jpegRepresentation(
             of: image,
             colorSpace: colorSpace,
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: supportsDepth ? 0.68 : 0.62]
+            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: supportsDepth ? 0.74 : 0.70]
         ) else { return }
 
         let frameID = "frame_\(capturedKeyframes.count + 1)"
@@ -1136,9 +1236,15 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             keyframeCount = capturedKeyframes.count
             lastKeyframeTime = frame.timestamp
             lastKeyframePosition = position
+            lastKeyframeRotation = rotation
         } catch {
             message = "핵심 프레임을 저장하지 못했습니다: \(error.localizedDescription)"
         }
+    }
+
+    private func angularDistanceDegrees(_ lhs: simd_quatf, _ rhs: simd_quatf) -> Double {
+        let dot = min(1.0, max(-1.0, Double(simd_dot(lhs.vector, rhs.vector))))
+        return 2.0 * acos(abs(dot)) * 180.0 / .pi
     }
 
     private var scansRoot: URL {
@@ -1199,6 +1305,14 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             try packed.write(to: url, options: .atomic)
             return (url, width, height, packed.count)
         } catch { return nil }
+    }
+}
+
+private extension ARGeometrySource {
+    func vertex(at index: Int) -> SIMD3<Float> {
+        precondition(format == .float3, "Expected float3 mesh vertices")
+        let pointer = buffer.contents().advanced(by: offset + index * stride)
+        return pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
     }
 }
 

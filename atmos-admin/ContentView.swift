@@ -936,11 +936,18 @@ struct ContentView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(.white.opacity(0.92), in: Capsule())
-            MiniScanPathMap(path: scanner.scanPath, headingDegrees: scanner.currentMapHeadingDegrees)
-                .frame(width: 132, height: 112)
+            MiniSpatialScanMap(
+                path: scanner.scanPath,
+                spatialPoints: scanner.spatialPreviewPoints,
+                headingDegrees: scanner.currentMapHeadingDegrees,
+                meshAnchorCount: scanner.meshAnchorCount,
+                planeAnchorCount: scanner.planeAnchorCount,
+                meshVertexCount: scanner.meshVertexCount
+            )
+            .frame(width: 148, height: 128)
         }
-        .opacity(scanner.status == .scanning || !scanner.scanPath.isEmpty ? 1 : 0)
-        .accessibilityLabel("현재 스캔 영역 작은 지도, 품질 점수, 지도 방향")
+        .opacity(scanner.status == .scanning || !scanner.scanPath.isEmpty || !scanner.spatialPreviewPoints.isEmpty ? 1 : 0)
+        .accessibilityLabel("현재 스캔 영역, 공간 메시 프리뷰, 품질 점수, 지도 방향")
     }
 
     private func scanMetric(_ title: String, _ value: String, _ symbol: String) -> some View {
@@ -1023,9 +1030,11 @@ struct ContentView: View {
             qualityRow("정상 추적 90% 이상", ok: scanner.normalTrackingRatio >= 0.9 || scanner.sampleCount == 0)
             qualityRow("평균 특징점 100개 이상", ok: scanner.averageFeaturePointCount >= 100 || scanner.sampleCount == 0)
             qualityRow("실시간 안정성 65점 이상", ok: scanner.scanStabilityScore >= 0.65 || scanner.sampleCount == 0)
-            qualityRow("핵심 화면 8장 이상", ok: scanner.keyframeCount >= 8 || scanner.sampleCount == 0)
+            qualityRow("핵심 화면 12장 이상", ok: scanner.keyframeCount >= 12 || scanner.sampleCount == 0)
             qualityRow("이동 거리 8미터 이상", ok: scanner.totalDistance >= 8 || scanner.sampleCount == 0)
             qualityRow("스캔 커버리지 6미터 이상", ok: scanner.coverageSpanMeters >= 6 || scanner.sampleCount == 0)
+            qualityRow("공간 메시 또는 특징점 확보", ok: !scanner.spatialPreviewPoints.isEmpty || scanner.sampleCount == 0)
+            qualityRow("학습 데이터셋 포즈·이미지·공간 샘플 확보", ok: scanner.keyframeCount >= 12 && !scanner.spatialPreviewPoints.isEmpty || scanner.sampleCount == 0)
             qualityRow("개인정보·문서 노출 최소화", ok: true)
             if !qualityIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1238,7 +1247,7 @@ struct ContentView: View {
 
     private func semanticReviewNodes(in graph: SceneGraphValue) -> [SceneGraphNodeValue] {
         graph.nodes
-            .filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "floor" }
+            .filter { !$0.id.hasPrefix("trajectory:") && !["floor", "space_sample"].contains($0.kind) }
             .sorted { lhs, rhs in
                 let lhsPriority = reviewPriority(lhs)
                 let rhsPriority = reviewPriority(rhs)
@@ -1373,10 +1382,11 @@ struct ContentView: View {
         let tracking = min(scanner.normalTrackingRatio / 0.9, 1)
         let features = min(scanner.averageFeaturePointCount / 100, 1)
         let stability = min(scanner.scanStabilityScore / 0.65, 1)
-        let keyframes = min(Double(scanner.keyframeCount) / 8, 1)
+        let keyframes = min(Double(scanner.keyframeCount) / 12, 1)
         let distance = min(scanner.totalDistance / 8, 1)
         let coverage = min(scanner.coverageSpanMeters / 6, 1)
-        return max(0, min(1, tracking * 0.27 + features * 0.20 + stability * 0.18 + keyframes * 0.18 + distance * 0.09 + coverage * 0.08))
+        let spatial = scanner.spatialPreviewPoints.isEmpty ? 0.0 : 1.0
+        return max(0, min(1, tracking * 0.23 + features * 0.18 + stability * 0.16 + keyframes * 0.20 + distance * 0.09 + coverage * 0.08 + spatial * 0.06))
     }
 
     private var qualityColor: Color {
@@ -1406,8 +1416,11 @@ struct ContentView: View {
         if scanner.scanStabilityScore < 0.65 {
             issues.append("급하게 걷거나 회전하지 말고 휴대폰을 천천히 훑어 주세요.")
         }
-        if scanner.keyframeCount < 8 {
-            issues.append("문, 표지판, 엘리베이터, 계단이 보이도록 더 오래 비춰 주세요.")
+        if scanner.keyframeCount < 12 {
+            issues.append("VGGT가 구조를 잡을 수 있게 문, 표지판, 벽면, 바닥 경계를 더 오래 훑어 주세요.")
+        }
+        if scanner.spatialPreviewPoints.isEmpty {
+            issues.append("우측 상단 공간 프리뷰가 채워지도록 바닥과 벽이 함께 보이게 천천히 스캔해 주세요.")
         }
         if scanner.totalDistance < 8 {
             issues.append("복도 중심선을 따라 최소 \(Int(ceil(8 - scanner.totalDistance)))미터 더 걸어 주세요.")
@@ -1434,8 +1447,11 @@ struct ContentView: View {
         if scanner.scanStabilityScore < 0.65 && scanner.sampleCount > 10 {
             return "너무 빠릅니다. 천천히 걷고 휴대폰 회전을 줄여 주세요"
         }
-        if scanner.keyframeCount < 8 {
-            return "문·표지판·엘리베이터·계단을 화면 중앙에 넣어 주세요"
+        if scanner.spatialPreviewPoints.isEmpty && scanner.sampleCount > 6 {
+            return "바닥과 벽을 함께 비춰 우측 상단 공간 프리뷰를 채워 주세요"
+        }
+        if scanner.keyframeCount < 12 {
+            return "VGGT용 핵심 화면을 모으는 중입니다. 벽·바닥·문을 천천히 훑어 주세요"
         }
         if scanner.totalDistance < 8 {
             return "복도 중심선을 따라 조금 더 이동해 주세요"
@@ -1678,7 +1694,7 @@ private struct ReviewMapOverview: View {
     let graph: SceneGraphValue
 
     private var visibleNodes: [SceneGraphNodeValue] {
-        graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
+        graph.nodes.filter { !["floor", "space_sample"].contains($0.kind) && $0.reviewStatus != "rejected" }
     }
 
     private var routeNodes: [SceneGraphNodeValue] {
@@ -1691,7 +1707,7 @@ private struct ReviewMapOverview: View {
 
     private var destinationNodes: [SceneGraphNodeValue] {
         graph.nodes
-            .filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "floor" && $0.reviewStatus != "rejected" }
+            .filter { !$0.id.hasPrefix("trajectory:") && !["floor", "space_sample"].contains($0.kind) && $0.reviewStatus != "rejected" }
             .sorted { lhs, rhs in
                 if nodePriority(lhs) != nodePriority(rhs) { return nodePriority(lhs) < nodePriority(rhs) }
                 return lhs.id < rhs.id
@@ -1881,7 +1897,7 @@ private struct EditableGraphMap: View {
     @State private var dragPreview: [String: Vector3Value] = [:]
 
     private var editableNodes: [SceneGraphNodeValue] {
-        graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
+        graph.nodes.filter { !["floor", "space_sample"].contains($0.kind) && $0.reviewStatus != "rejected" }
     }
 
     var body: some View {
@@ -2049,9 +2065,13 @@ private struct EditableGraphMap: View {
     }
 }
 
-private struct MiniScanPathMap: View {
+private struct MiniSpatialScanMap: View {
     let path: [Vector3Value]
+    let spatialPoints: [Vector3Value]
     let headingDegrees: Double
+    let meshAnchorCount: Int
+    let planeAnchorCount: Int
+    let meshVertexCount: Int
 
     var body: some View {
         GeometryReader { proxy in
@@ -2063,6 +2083,14 @@ private struct MiniScanPathMap: View {
                 grid(in: proxy.size)
                     .stroke(AdminTheme.stroke.opacity(0.62), lineWidth: 1)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                ForEach(Array(spatialPoints.prefix(180).enumerated()), id: \.offset) { _, item in
+                    Circle()
+                        .fill(pointColor(item))
+                        .frame(width: 3.2, height: 3.2)
+                        .position(point(for: item, in: proxy.size))
+                        .opacity(0.78)
+                }
 
                 if path.count >= 2 {
                     Path { drawing in
@@ -2086,9 +2114,9 @@ private struct MiniScanPathMap: View {
                     .accessibilityHidden(true)
                 } else {
                     VStack(spacing: 4) {
-                        Image(systemName: "map")
+                        Image(systemName: "view.3d")
                             .font(.headline.weight(.black))
-                        Text("스캔 지도")
+                        Text("공간 스캔")
                             .font(.caption2.weight(.black))
                     }
                     .foregroundStyle(AdminTheme.violet)
@@ -2096,6 +2124,12 @@ private struct MiniScanPathMap: View {
 
                 VStack {
                     HStack {
+                        Text(meshAnchorCount > 0 ? "메시 \(compactCount(meshVertexCount))" : "점 \(spatialPoints.count)")
+                            .font(.caption2.weight(.black))
+                            .foregroundStyle(meshAnchorCount > 0 ? AdminTheme.safe : AdminTheme.violet)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(.white.opacity(0.90), in: Capsule())
                         Spacer()
                         Text("북")
                             .font(.caption2.weight(.black))
@@ -2105,6 +2139,19 @@ private struct MiniScanPathMap: View {
                             .background(.white.opacity(0.90), in: Capsule())
                     }
                     Spacer()
+                }
+                .padding(7)
+                VStack {
+                    Spacer()
+                    HStack {
+                        Label("\(planeAnchorCount)", systemImage: "square.split.diagonal.2x2")
+                            .font(.caption2.weight(.black))
+                            .foregroundStyle(AdminTheme.mutedInk)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(.white.opacity(0.88), in: Capsule())
+                        Spacer()
+                    }
                 }
                 .padding(7)
             }
@@ -2126,8 +2173,9 @@ private struct MiniScanPathMap: View {
     }
 
     private func point(for item: Vector3Value, in size: CGSize) -> CGPoint {
-        let xs = path.map { Double($0.x) }
-        let zs = path.map { Double($0.z) }
+        let reference = path + spatialPoints
+        let xs = reference.map { Double($0.x) }
+        let zs = reference.map { Double($0.z) }
         let minX = xs.min() ?? 0
         let maxX = xs.max() ?? 1
         let minZ = zs.min() ?? 0
@@ -2141,6 +2189,19 @@ private struct MiniScanPathMap: View {
             x: size.width - padding - normalizedX * width,
             y: size.height - padding - normalizedZ * height
         )
+    }
+
+    private func pointColor(_ item: Vector3Value) -> Color {
+        if item.y < -0.35 { return AdminTheme.route.opacity(0.72) }
+        if item.y > 0.75 { return AdminTheme.caution.opacity(0.74) }
+        return AdminTheme.safe.opacity(0.74)
+    }
+
+    private func compactCount(_ value: Int) -> String {
+        if value >= 1000 {
+            return "\(value / 1000)k"
+        }
+        return "\(value)"
     }
 }
 

@@ -88,6 +88,13 @@ struct ScanManifestValue: Codable {
     let totalDistanceM: Double
     let samples: [PoseSampleValue]
     let keyframes: [KeyframeMetadataValue]
+    let spatialSamples: [Vector3Value]?
+    let meshAnchorCount: Int?
+    let planeAnchorCount: Int?
+    let meshVertexCount: Int?
+    let datasetSchemaVersion: Int?
+    let capturePurpose: String?
+    let privacyMode: String?
 }
 
 struct ScanReceipt: Decodable {
