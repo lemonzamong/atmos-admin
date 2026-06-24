@@ -158,6 +158,35 @@ struct SceneGraphValue: Decodable {
     let relations: [SceneGraphRelationValue]
 }
 
+struct DigitalTwinBoundsValue: Decodable {
+    let min: Vector3Value
+    let max: Vector3Value
+}
+
+struct DigitalTwinAssetManifestValue: Decodable {
+    let schemaVersion: Int
+    let assetId: UUID
+    let sessionId: UUID
+    let buildingId: UUID
+    let status: String
+    let pointCloudUrl: String?
+    let pointCloudFormat: String
+    let pointCloudMimeType: String
+    let fileSizeBytes: Int
+    let pointCount: Int
+    let bounds: DigitalTwinBoundsValue?
+    let coordinateSystem: String
+    let units: String
+    let sourceModel: String
+    let pipelineVersion: String
+    let checksumSha256: String?
+    let generatedAt: Date?
+    let errorCode: String?
+    let errorMessage: String?
+
+    var isCompleted: Bool { status == "completed" && pointCloudUrl != nil && pointCount > 0 }
+}
+
 struct SceneGraphNodeValue: Decodable, Identifiable {
     let id: String
     let kind: String

@@ -1075,7 +1075,14 @@ struct ContentView: View {
                     reviewStat("목적지", "\(semanticReviewNodes(in: graph).count)", AdminTheme.violet)
                     reviewStat("경로", "\(routeWaypointCount(in: graph))", AdminTheme.route)
                 }
-                DigitalTwinPreview(graph: graph)
+                DigitalTwinPreview(
+                    graph: graph,
+                    manifest: scanner.digitalTwinManifest,
+                    pointCloudURL: scanner.digitalTwinPointCloudURL,
+                    isDownloading: scanner.isDownloadingDigitalTwin
+                ) {
+                    Task { await scanner.refreshDigitalTwinAsset() }
+                }
                     .frame(height: 340)
                 ReviewMapOverview(graph: graph)
                     .frame(height: 300)
@@ -1896,6 +1903,10 @@ private struct MapCandidateMarker: View {
 
 private struct DigitalTwinPreview: View {
     let graph: SceneGraphValue
+    let manifest: DigitalTwinAssetManifestValue?
+    let pointCloudURL: URL?
+    let isDownloading: Bool
+    let onRefresh: () -> Void
 
     private var renderableNodes: [SceneGraphNodeValue] {
         graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
@@ -1903,10 +1914,6 @@ private struct DigitalTwinPreview: View {
 
     private var routeCount: Int {
         renderableNodes.filter { $0.id.hasPrefix("trajectory:") }.count
-    }
-
-    private var pointCount: Int {
-        renderableNodes.filter { $0.kind == "space_sample" }.count
     }
 
     private var objectCount: Int {
@@ -1920,33 +1927,32 @@ private struct DigitalTwinPreview: View {
                     .font(.headline.weight(.black))
                     .foregroundStyle(AdminTheme.ink)
                 Spacer()
-                Text("경로 \(routeCount) · 점군 \(pointCount) · 태그 \(objectCount)")
+                Text("경로 \(routeCount) · 점군 \(manifest?.pointCount ?? 0) · 태그 \(objectCount)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(AdminTheme.mutedInk)
             }
             ZStack {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color(red: 0.955, green: 0.965, blue: 0.990))
-                if renderableNodes.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "clock.fill")
-                            .font(.title2.weight(.black))
-                        Text("서버 3D 재구성 대기 중")
-                            .font(.headline.weight(.black))
-                        Text("AI 처리가 끝나면 이곳에 디지털트윈이 렌더링됩니다.")
-                            .font(.caption.weight(.bold))
-                    }
-                    .foregroundStyle(AdminTheme.mutedInk)
-                    .multilineTextAlignment(.center)
-                    .padding()
-                } else {
-                    DigitalTwinSceneView(graph: graph)
+                if let pointCloudURL, manifest?.isCompleted == true {
+                    DigitalTwinSceneView(graph: graph, pointCloudURL: pointCloudURL, manifest: manifest)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                } else {
+                    digitalTwinStateView
                 }
                 VStack {
                     HStack {
+                        if pointCloudURL == nil || manifest?.status != "completed" {
+                            Button(action: onRefresh) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption.weight(.black))
+                                    .foregroundStyle(AdminTheme.ink)
+                                    .frame(width: 30, height: 30)
+                                    .background(.white.opacity(0.88), in: Circle())
+                            }
+                        }
                         Spacer()
-                        Text("드래그 회전")
+                        Text(pointCloudURL == nil ? (manifest?.status ?? "processing") : "드래그·핀치")
                             .font(.caption2.weight(.black))
                             .foregroundStyle(AdminTheme.ink)
                             .padding(.horizontal, 9)
@@ -1963,10 +1969,41 @@ private struct DigitalTwinPreview: View {
         .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(.white.opacity(0.78), lineWidth: 1))
         .shadow(color: AdminTheme.shadow(0.08), radius: 18, y: 9)
     }
+
+    @ViewBuilder private var digitalTwinStateView: some View {
+        VStack(spacing: 9) {
+            if isDownloading {
+                ProgressView()
+                    .controlSize(.large)
+                Text("point cloud 다운로드 중")
+                    .font(.headline.weight(.black))
+            } else if manifest?.status == "failed" {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title2.weight(.black))
+                    .foregroundStyle(AdminTheme.danger)
+                Text("디지털트윈 생성 실패")
+                    .font(.headline.weight(.black))
+                Text(manifest?.errorMessage ?? "서버 산출물 오류를 확인해야 합니다.")
+                    .font(.caption.weight(.bold))
+            } else {
+                Image(systemName: "clock.fill")
+                    .font(.title2.weight(.black))
+                Text("서버 3D 재구성 대기 중")
+                    .font(.headline.weight(.black))
+                Text("완료 후 실제 binary PLY point cloud를 내려받아 표시합니다.")
+                    .font(.caption.weight(.bold))
+            }
+        }
+        .foregroundStyle(AdminTheme.mutedInk)
+        .multilineTextAlignment(.center)
+        .padding()
+    }
 }
 
 private struct DigitalTwinSceneView: UIViewRepresentable {
     let graph: SceneGraphValue
+    let pointCloudURL: URL
+    let manifest: DigitalTwinAssetManifestValue?
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
@@ -1974,35 +2011,80 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         view.allowsCameraControl = true
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .multisampling4X
+        view.defaultCameraController.interactionMode = .orbitTurntable
         return view
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
-        let scene = makeScene()
-        view.scene = scene
-        view.pointOfView = scene.rootNode.childNode(withName: "digital-twin-camera", recursively: false)
+        context.coordinator.load(url: pointCloudURL, graph: graph, manifest: manifest, into: view)
     }
 
-    private func makeScene() -> SCNScene {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        private var loadedURL: URL?
+        private var task: Task<Void, Never>?
+
+        func load(url: URL, graph: SceneGraphValue, manifest: DigitalTwinAssetManifestValue?, into view: SCNView) {
+            guard loadedURL != url else { return }
+            loadedURL = url
+            task?.cancel()
+            view.scene = DigitalTwinSceneFactory.placeholderScene(text: "point cloud 로딩 중")
+            task = Task.detached(priority: .userInitiated) {
+                do {
+                    let pointCloud = try BinaryPLYPointCloud(contentsOf: url)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        let scene = DigitalTwinSceneFactory.makeScene(graph: graph, pointCloud: pointCloud, manifest: manifest)
+                        view.scene = scene
+                        view.pointOfView = scene.rootNode.childNode(withName: "digital-twin-camera", recursively: false)
+                    }
+                } catch {
+                    await MainActor.run {
+                        view.scene = DigitalTwinSceneFactory.placeholderScene(text: error.localizedDescription)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum DigitalTwinSceneFactory {
+    static func makeScene(graph: SceneGraphValue, pointCloud: BinaryPLYPointCloud, manifest: DigitalTwinAssetManifestValue?) -> SCNScene {
         let scene = SCNScene()
         scene.background.contents = UIColor.clear
         let visibleNodes = graph.nodes.filter { $0.kind != "floor" && $0.reviewStatus != "rejected" }
-        let bounds = SpatialBounds(points: visibleNodes.map(\.geometry.center))
+        let bounds = SpatialBounds(points: pointCloud.boundsPoints + visibleNodes.map(\.geometry.center))
         let root = SCNNode()
         scene.rootNode.addChildNode(root)
 
         addLights(to: scene)
         addGrid(to: root, bounds: bounds)
-        addPointCloud(to: root, nodes: visibleNodes, bounds: bounds)
-        addRelations(to: root, nodes: visibleNodes, bounds: bounds)
+        root.addChildNode(SCNNode(geometry: pointCloud.geometry(centeredBy: bounds.center)))
+        addRelations(to: root, graph: graph, nodes: visibleNodes, bounds: bounds)
         addRoute(to: root, nodes: visibleNodes, bounds: bounds)
         addSemanticNodes(to: root, nodes: visibleNodes, bounds: bounds)
         addCamera(to: scene, bounds: bounds)
-
         return scene
     }
 
-    private func addLights(to scene: SCNScene) {
+    static func placeholderScene(text: String) -> SCNScene {
+        let scene = SCNScene()
+        scene.background.contents = UIColor.clear
+        let label = SCNText(string: text, extrusionDepth: 0.002)
+        label.font = UIFont.systemFont(ofSize: 0.18, weight: .bold)
+        label.firstMaterial = material(UIColor(white: 0.1, alpha: 1), emission: 0)
+        let node = SCNNode(geometry: label)
+        node.position = SCNVector3(-1.0, 0, 0)
+        scene.rootNode.addChildNode(node)
+        addCamera(to: scene, bounds: SpatialBounds(points: [Vector3Value(x: 0, y: 0, z: 0)]))
+        addLights(to: scene)
+        return scene
+    }
+
+    private static func addLights(to scene: SCNScene) {
         let ambient = SCNNode()
         ambient.light = SCNLight()
         ambient.light?.type = .ambient
@@ -2017,7 +2099,7 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         scene.rootNode.addChildNode(key)
     }
 
-    private func addCamera(to scene: SCNScene, bounds: SpatialBounds) {
+    private static func addCamera(to scene: SCNScene, bounds: SpatialBounds) {
         let camera = SCNNode()
         camera.name = "digital-twin-camera"
         camera.camera = SCNCamera()
@@ -2028,7 +2110,7 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         scene.rootNode.addChildNode(camera)
     }
 
-    private func addGrid(to root: SCNNode, bounds: SpatialBounds) {
+    private static func addGrid(to root: SCNNode, bounds: SpatialBounds) {
         let extent = max(bounds.radius, 2.0)
         let floorY = bounds.floorY - 0.03
         let material = lineMaterial(UIColor(white: 1, alpha: 0.56))
@@ -2039,24 +2121,7 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         }
     }
 
-    private func addPointCloud(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
-        let samples = nodes.filter { $0.kind == "space_sample" }
-        for node in samples.prefix(320) {
-            let sphere = SCNSphere(radius: 0.025)
-            sphere.segmentCount = 8
-            sphere.firstMaterial = material(UIColor(red: 0.34, green: 0.28, blue: 1.0, alpha: 0.66), emission: 0.18)
-            let point = SCNNode(geometry: sphere)
-            point.position = bounds.scenePoint(node.geometry.center)
-            point.opacity = 0.82
-            point.runAction(.repeatForever(.sequence([
-                .fadeOpacity(to: 0.35, duration: 0.9),
-                .fadeOpacity(to: 0.9, duration: 0.9)
-            ])))
-            root.addChildNode(point)
-        }
-    }
-
-    private func addRoute(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+    private static func addRoute(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
         let route = nodes
             .filter { $0.id.hasPrefix("trajectory:") }
             .sorted { trajectoryIndex($0.id) < trajectoryIndex($1.id) }
@@ -2076,7 +2141,7 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         }
     }
 
-    private func addRelations(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+    private static func addRelations(to root: SCNNode, graph: SceneGraphValue, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
         let nodeByID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
         for relation in graph.relations where relation.reviewStatus != "rejected" && relation.predicate != "scan_path_connected" {
             guard let source = nodeByID[relation.sourceId], let target = nodeByID[relation.targetId] else { continue }
@@ -2091,14 +2156,13 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         }
     }
 
-    private func addSemanticNodes(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
+    private static func addSemanticNodes(to root: SCNNode, nodes: [SceneGraphNodeValue], bounds: SpatialBounds) {
         let semanticNodes = nodes
             .filter { !$0.id.hasPrefix("trajectory:") && $0.kind != "space_sample" }
             .prefix(36)
         for node in semanticNodes {
-            let color = color(for: node)
             let box = SCNBox(width: 0.22, height: 0.16, length: 0.22, chamferRadius: 0.035)
-            box.firstMaterial = material(color, emission: 0.14)
+            box.firstMaterial = material(color(for: node), emission: 0.14)
             let marker = SCNNode(geometry: box)
             marker.position = bounds.scenePoint(node.geometry.center) + SCNVector3(0, 0.16, 0)
             root.addChildNode(marker)
@@ -2117,10 +2181,8 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         }
     }
 
-    private func color(for node: SceneGraphNodeValue) -> UIColor {
-        if node.attributes["hazard"] == "true" {
-            return UIColor(red: 0.95, green: 0.23, blue: 0.18, alpha: 0.92)
-        }
+    private static func color(for node: SceneGraphNodeValue) -> UIColor {
+        if node.attributes["hazard"] == "true" { return UIColor(red: 0.95, green: 0.23, blue: 0.18, alpha: 0.92) }
         if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" {
             return UIColor(red: 1.0, green: 0.58, blue: 0.12, alpha: 0.92)
         }
@@ -2130,7 +2192,7 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         return UIColor(red: 0.32, green: 0.25, blue: 0.86, alpha: 0.9)
     }
 
-    private func lineNode(from: SCNVector3, to: SCNVector3, material: SCNMaterial) -> SCNNode {
+    private static func lineNode(from: SCNVector3, to: SCNVector3, material: SCNMaterial) -> SCNNode {
         let source = SCNGeometrySource(vertices: [from, to])
         let indices: [Int32] = [0, 1]
         let data = indices.withUnsafeBufferPointer { Data(buffer: $0) }
@@ -2140,11 +2202,11 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         return SCNNode(geometry: geometry)
     }
 
-    private func lineMaterial(_ color: UIColor) -> SCNMaterial {
+    private static func lineMaterial(_ color: UIColor) -> SCNMaterial {
         material(color, emission: 0.05)
     }
 
-    private func material(_ color: UIColor, emission: CGFloat) -> SCNMaterial {
+    private static func material(_ color: UIColor, emission: CGFloat) -> SCNMaterial {
         let material = SCNMaterial()
         material.diffuse.contents = color
         material.emission.contents = color.withAlphaComponent(emission)
@@ -2153,8 +2215,132 @@ private struct DigitalTwinSceneView: UIViewRepresentable {
         return material
     }
 
-    private func trajectoryIndex(_ id: String) -> Int {
+    private static func trajectoryIndex(_ id: String) -> Int {
         Int(id.split(separator: ":").last ?? "") ?? 0
+    }
+}
+
+private struct BinaryPLYPointCloud {
+    let vertices: [SCNVector3]
+    let colors: [UInt8]
+    let boundsPoints: [Vector3Value]
+
+    nonisolated init(contentsOf url: URL) throws {
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        guard let headerEnd = data.range(of: Data("end_header\n".utf8)) else {
+            throw PLYError.invalidHeader
+        }
+        let headerData = data[..<headerEnd.upperBound]
+        guard let header = String(data: headerData, encoding: .ascii) else {
+            throw PLYError.invalidHeader
+        }
+        guard header.contains("format binary_little_endian 1.0") else {
+            throw PLYError.unsupportedFormat
+        }
+        let vertexCount = try Self.vertexCount(from: header)
+        let recordSize = MemoryLayout<Float>.size * 3 + 3
+        let bodyOffset = headerEnd.upperBound
+        guard data.count >= bodyOffset + vertexCount * recordSize else {
+            throw PLYError.truncatedBody
+        }
+        var vertices: [SCNVector3] = []
+        vertices.reserveCapacity(vertexCount)
+        var rgba: [UInt8] = []
+        rgba.reserveCapacity(vertexCount * 4)
+        var offset = bodyOffset
+        var minX = Float.greatestFiniteMagnitude
+        var minY = Float.greatestFiniteMagnitude
+        var minZ = Float.greatestFiniteMagnitude
+        var maxX = -Float.greatestFiniteMagnitude
+        var maxY = -Float.greatestFiniteMagnitude
+        var maxZ = -Float.greatestFiniteMagnitude
+        for _ in 0..<vertexCount {
+            let x = data.float32LittleEndian(at: offset)
+            let y = data.float32LittleEndian(at: offset + 4)
+            let z = data.float32LittleEndian(at: offset + 8)
+            let r = data[offset + 12]
+            let g = data[offset + 13]
+            let b = data[offset + 14]
+            vertices.append(SCNVector3(x, y, z))
+            rgba.append(contentsOf: [r, g, b, 255])
+            minX = min(minX, x); minY = min(minY, y); minZ = min(minZ, z)
+            maxX = max(maxX, x); maxY = max(maxY, y); maxZ = max(maxZ, z)
+            offset += recordSize
+        }
+        self.vertices = vertices
+        self.colors = rgba
+        if vertexCount == 0 {
+            boundsPoints = [Vector3Value(x: 0, y: 0, z: 0)]
+        } else {
+            boundsPoints = [
+                Vector3Value(x: minX, y: minY, z: minZ),
+                Vector3Value(x: maxX, y: maxY, z: maxZ)
+            ]
+        }
+    }
+
+    func geometry(centeredBy center: Vector3Value) -> SCNGeometry {
+        let centeredVertices = vertices.map { SCNVector3($0.x - center.x, $0.y - center.y, $0.z - center.z) }
+        let vertexSource = SCNGeometrySource(vertices: centeredVertices)
+        let colorData = Data(colors)
+        let colorSource = SCNGeometrySource(
+            data: colorData,
+            semantic: .color,
+            vectorCount: centeredVertices.count,
+            usesFloatComponents: false,
+            componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<UInt8>.size,
+            dataOffset: 0,
+            dataStride: MemoryLayout<UInt8>.size * 4
+        )
+        let indices = (0..<Int32(centeredVertices.count)).map { $0 }
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .point,
+            primitiveCount: centeredVertices.count,
+            bytesPerIndex: MemoryLayout<Int32>.size
+        )
+        let geometry = SCNGeometry(sources: [vertexSource, colorSource], elements: [element])
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = UIColor.white
+        material.isDoubleSided = true
+        geometry.materials = [material]
+        return geometry
+    }
+
+    private nonisolated static func vertexCount(from header: String) throws -> Int {
+        for line in header.split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            if parts.count == 3, parts[0] == "element", parts[1] == "vertex", let count = Int(parts[2]) {
+                return count
+            }
+        }
+        throw PLYError.invalidHeader
+    }
+
+    enum PLYError: LocalizedError {
+        case invalidHeader
+        case unsupportedFormat
+        case truncatedBody
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidHeader: "PLY 헤더를 읽을 수 없습니다."
+            case .unsupportedFormat: "지원하지 않는 PLY 형식입니다."
+            case .truncatedBody: "PLY vertex 데이터가 파일 크기와 일치하지 않습니다."
+            }
+        }
+    }
+}
+
+private extension Data {
+    nonisolated func float32LittleEndian(at offset: Int) -> Float {
+        self.withUnsafeBytes { rawBuffer in
+            let base = rawBuffer.baseAddress!.advanced(by: offset)
+            return base.loadUnaligned(as: Float.self)
+        }
     }
 }
 
@@ -2593,6 +2779,7 @@ private struct SpatialBounds {
     let centerZ: Float
     let radius: Float
     let floorY: Float
+    var center: Vector3Value { Vector3Value(x: centerX, y: centerY, z: centerZ) }
 
     init(points: [Vector3Value]) {
         guard !points.isEmpty else {

@@ -123,6 +123,28 @@ struct AdminAPIClient {
         return try decoder.decode(SceneGraphValue.self, from: data)
     }
 
+    func digitalTwin(buildingID: UUID, sessionID: UUID) async throws -> DigitalTwinAssetManifestValue {
+        let request = URLRequest(url: baseURL.appending(path: "/v1/buildings/\(buildingID.uuidString)/scans/\(sessionID.uuidString)/digital-twin"))
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DigitalTwinAssetManifestValue.self, from: data)
+    }
+
+    func downloadDigitalTwinPointCloud(_ manifest: DigitalTwinAssetManifestValue) async throws -> URL {
+        guard let path = manifest.pointCloudUrl, let url = resolvedURL(path) else {
+            throw APIError.processingFailed("디지털트윈 point cloud 주소가 없습니다.")
+        }
+        let request = URLRequest(url: url)
+        let (temporaryURL, response) = try await session.download(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300 ~= http.statusCode) {
+            throw APIError.serverMessage(statusCode: http.statusCode, detail: nil)
+        }
+        return temporaryURL
+    }
+
     func publish(buildingID: UUID, sessionID: UUID) async throws -> PublishReceiptValue {
         var request = URLRequest(url: baseURL.appending(path: "/v1/buildings/\(buildingID.uuidString)/scans/\(sessionID.uuidString)/publish"))
         request.httpMethod = "POST"
@@ -243,6 +265,16 @@ struct AdminAPIClient {
         configureNetworkStabilityHeaders(&request)
         let (responseData, response) = try await performUpload(request, from: data, retryCount: 2)
         try validate(response: response, data: responseData)
+    }
+
+    private func resolvedURL(_ value: String) -> URL? {
+        if let absolute = URL(string: value), absolute.scheme != nil {
+            return absolute
+        }
+        guard value.starts(with: "/") else {
+            return baseURL.appending(path: value)
+        }
+        return URL(string: value, relativeTo: baseURL)?.absoluteURL
     }
 
     private func request<Response: Decodable, Body: Encodable>(

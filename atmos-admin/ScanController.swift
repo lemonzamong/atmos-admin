@@ -70,6 +70,9 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published private(set) var message: String?
     @Published private(set) var processingProgress = 0.0
     @Published private(set) var reviewGraph: SceneGraphValue?
+    @Published private(set) var digitalTwinManifest: DigitalTwinAssetManifestValue?
+    @Published private(set) var digitalTwinPointCloudURL: URL?
+    @Published private(set) var isDownloadingDigitalTwin = false
     @Published private(set) var uploadedBuildingID: UUID?
     @Published private(set) var uploadedSessionID: UUID?
     @Published private(set) var packageVersions: [PackageVersionInfoValue] = []
@@ -173,6 +176,9 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         stableTrackingStartTime = nil
         observedFrameCount = 0
         completedManifest = nil
+        reviewGraph = nil
+        digitalTwinManifest = nil
+        digitalTwinPointCloudURL = nil
         message = "먼저 제자리에서 문, 표지판, 벽 모서리, 바닥 경계를 천천히 훑어 주세요."
         startedAt = Date()
         startMotionHeadingUpdates()
@@ -422,6 +428,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             switch job.status {
             case "review_required":
                 reviewGraph = try await apiClient.sceneGraph(buildingID: job.buildingId, sessionID: job.scanSessionId)
+                try await loadDigitalTwinAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
                 packageVersions = try await apiClient.packageVersions(buildingID: job.buildingId)
                 status = .uploaded
                 message = "검수 대기 작업을 불러왔습니다. 공간 노드와 연결을 확인한 뒤 게시하세요."
@@ -431,6 +438,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             default:
                 if let graph = try? await apiClient.sceneGraph(buildingID: job.buildingId, sessionID: job.scanSessionId) {
                     reviewGraph = graph
+                    try await loadDigitalTwinAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
                     packageVersions = try await apiClient.packageVersions(buildingID: job.buildingId)
                     status = .uploaded
                     message = "기존 공간 검수 데이터를 불러왔습니다. 목적지 이름을 수정한 뒤 다시 게시하세요."
@@ -454,6 +462,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             case "review_required":
                 if let uploadedBuildingID, let uploadedSessionID {
                     reviewGraph = try await apiClient.sceneGraph(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
+                    try await loadDigitalTwinAsset(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
                 }
                 status = .uploaded
                 return
@@ -562,6 +571,56 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if ["elevator", "stairs", "escalator", "exit"].contains(nodeType) { return false }
         let vlmConfidence = Double(node.attributes["vlm_confidence"] ?? "1") ?? 0
         return node.semanticConfidence >= 0.82 && vlmConfidence >= 0.82
+    }
+
+    @MainActor
+    func refreshDigitalTwinAsset() async {
+        guard let uploadedBuildingID, let uploadedSessionID else { return }
+        do {
+            try await loadDigitalTwinAsset(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func loadDigitalTwinAsset(buildingID: UUID, sessionID: UUID) async throws {
+        let manifest = try await apiClient.digitalTwin(buildingID: buildingID, sessionID: sessionID)
+        digitalTwinManifest = manifest
+        guard manifest.isCompleted else {
+            digitalTwinPointCloudURL = nil
+            if manifest.status == "failed" {
+                message = manifest.errorMessage ?? "디지털트윈 생성에 실패했습니다."
+            }
+            return
+        }
+        let cachedURL = digitalTwinCacheURL(for: manifest)
+        if fileManager.fileExists(atPath: cachedURL.path),
+           let size = try? cachedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size == manifest.fileSizeBytes {
+            digitalTwinPointCloudURL = cachedURL
+            return
+        }
+        isDownloadingDigitalTwin = true
+        defer { isDownloadingDigitalTwin = false }
+        message = "서버에서 실제 binary point cloud를 내려받고 있습니다."
+        let temporaryURL = try await apiClient.downloadDigitalTwinPointCloud(manifest)
+        try fileManager.createDirectory(at: digitalTwinCacheRoot, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: cachedURL.path) {
+            try fileManager.removeItem(at: cachedURL)
+        }
+        try fileManager.moveItem(at: temporaryURL, to: cachedURL)
+        digitalTwinPointCloudURL = cachedURL
+        message = "디지털트윈 point cloud \(manifest.pointCount)점을 불러왔습니다."
+    }
+
+    private var digitalTwinCacheRoot: URL {
+        fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: "AtmosDigitalTwins", directoryHint: .isDirectory)
+    }
+
+    private func digitalTwinCacheURL(for manifest: DigitalTwinAssetManifestValue) -> URL {
+        digitalTwinCacheRoot.appending(path: "\(manifest.assetId.uuidString).ply")
     }
 
     @MainActor
