@@ -712,6 +712,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         qualitySampleCount += 1
         averageFeaturePointCount = qualitySampleCount == 0 ? 0 : Double(accumulatedFeaturePointCount) / Double(qualitySampleCount)
         normalTrackingRatio = Double(normalTrackingCount) / Double(max(observedFrameCount, 1))
+        updateFeaturePointPreviewIfNeeded(frame: frame)
 
         if !isRecordingPath {
             if shouldStartRecording(
@@ -802,7 +803,6 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         self.previousPosition = position
         updateCoverage(with: position)
         appendScanPath(position)
-        updateFeaturePointPreviewIfNeeded(frame: frame)
 
         samples.append(
             PoseSampleValue(
@@ -1330,8 +1330,12 @@ struct ARCameraView: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.session = controller.session
         view.automaticallyUpdatesLighting = true
+        view.debugOptions = [.showFeaturePoints]
+        view.preferredFramesPerSecond = 60
         return view
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        uiView.debugOptions = controller.status == .scanning ? [.showFeaturePoints] : []
+    }
 }

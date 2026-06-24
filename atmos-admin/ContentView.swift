@@ -945,7 +945,7 @@ struct ContentView: View {
                 planeAnchorCount: scanner.planeAnchorCount,
                 meshVertexCount: scanner.meshVertexCount
             )
-            .frame(width: 148, height: 128)
+            .frame(width: scanner.status == .scanning ? 178 : 148, height: scanner.status == .scanning ? 154 : 128)
         }
         .opacity(scanner.status == .scanning || !scanner.scanPath.isEmpty || !scanner.spatialPreviewPoints.isEmpty ? 1 : 0)
         .accessibilityLabel("현재 스캔 영역, 공간 메시 프리뷰, 품질 점수, 지도 방향")
