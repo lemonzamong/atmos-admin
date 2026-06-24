@@ -95,6 +95,10 @@ struct ScanManifestValue: Codable {
     let datasetSchemaVersion: Int?
     let capturePurpose: String?
     let privacyMode: String?
+    let physicalAiCaptureEnabled: Bool?
+    let qualityProfile: String?
+    let datasetRightsStatus: String?
+    let privacyReviewStatus: String?
 }
 
 struct ScanReceipt: Decodable {

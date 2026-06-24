@@ -235,7 +235,11 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             meshVertexCount: meshVertexCount,
             datasetSchemaVersion: 1,
             capturePurpose: "indoor_navigation_physical_ai_dataset",
-            privacyMode: "avoid_people_faces_documents"
+            privacyMode: "avoid_people_faces_documents",
+            physicalAiCaptureEnabled: true,
+            qualityProfile: "navigation_and_robot_learning",
+            datasetRightsStatus: "facility_permission_required_before_resale",
+            privacyReviewStatus: "pending_admin_review"
         )
         samples = finalizedSamples
         totalDistance = finalizedDistance
