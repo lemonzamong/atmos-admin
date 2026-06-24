@@ -485,7 +485,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                     continue
                 }
 
-                guard node.attributes["auto_review"] == "recommended", node.reviewStatus != "rejected" else {
+                guard isSafeAutoApprovalCandidate(node), node.reviewStatus != "rejected" else {
                     continue
                 }
                 let label = node.attributes["display_label"] ?? node.labels.first ?? node.id
@@ -517,6 +517,19 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             status = .failed
             message = error.localizedDescription
         }
+    }
+
+    private func isSafeAutoApprovalCandidate(_ node: SceneGraphNodeValue) -> Bool {
+        guard node.attributes["auto_review"] == "recommended" else { return false }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_review"] == "true" {
+            return false
+        }
+        if node.attributes["quality_warnings"] != nil { return false }
+        if node.attributes["hazard"] == "true" || node.attributes["restricted"] == "true" { return false }
+        let nodeType = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
+        if ["elevator", "stairs", "escalator", "exit"].contains(nodeType) { return false }
+        let vlmConfidence = Double(node.attributes["vlm_confidence"] ?? "1") ?? 0
+        return node.semanticConfidence >= 0.82 && vlmConfidence >= 0.82
     }
 
     @MainActor
