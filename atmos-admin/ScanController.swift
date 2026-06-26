@@ -585,15 +585,19 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             .filter { $0.id.hasPrefix("trajectory:") && $0.reviewStatus != "rejected" }
             .sorted { lhs, rhs in trajectoryIndex(lhs.id) < trajectoryIndex(rhs.id) }
         guard routeNodes.count >= 2 else { return nil }
-        let draftNodes = routeNodes.enumerated().map { index, node in
-            DraftRouteGraphNodeValue(
+
+        var draftNodes = routeNodes.enumerated().map { index, node in
+            let fallbackKind = index == 0 ? "entrance" : (index == routeNodes.count - 1 ? "waypoint" : "waypoint")
+            let kind = normalizedDraftNodeKind(node, fallback: fallbackKind)
+            return DraftRouteGraphNodeValue(
                 id: "review_wp_\(index + 1)",
-                floorId: node.floorId ?? "1층",
-                kind: index == 0 ? "entrance" : (index == routeNodes.count - 1 ? "room" : "waypoint"),
+                floorId: normalizedFloorId(node.floorId),
+                kind: kind,
                 x: Double(node.geometry.center.x),
                 y: Double(node.geometry.center.z),
-                label: node.labels.first ?? (index == 0 ? "출발 지점" : "검수 경로 \(index + 1)"),
-                accessible: node.attributes["accessible"] != "false" && node.attributes["restricted"] != "true"
+                label: displayLabel(for: node, fallback: index == 0 ? "출발 지점" : "검수 경로 \(index + 1)"),
+                accessible: isAccessible(node),
+                verticalConnectorGroupId: verticalConnectorGroupId(for: node, kind: kind)
             )
         }
         let indexBySourceID = Dictionary(uniqueKeysWithValues: routeNodes.enumerated().map { ($0.element.id, $0.offset) })
@@ -615,6 +619,53 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 draftEdges.append(makeDraftRouteEdge(source: draftNodes[sourceIndex], target: draftNodes[targetIndex]))
             }
         }
+
+        var sourceNodeToDraftId = Dictionary(uniqueKeysWithValues: routeNodes.enumerated().map { ($0.element.id, draftNodes[$0.offset].id) })
+        let semanticNodes = graph.nodes
+            .filter { shouldIncludeInPublishedDraft($0) }
+            .sorted { lhs, rhs in
+                let lhsPriority = draftSemanticPriority(lhs)
+                let rhsPriority = draftSemanticPriority(rhs)
+                if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                return lhs.id < rhs.id
+            }
+
+        var usedNodeIds = Set(draftNodes.map(\.id))
+        for (index, node) in semanticNodes.enumerated() {
+            let kind = normalizedDraftNodeKind(node, fallback: "room")
+            let nodeId = uniqueDraftNodeId(prefix: "review_\(kind)", sourceId: node.id, index: index + 1, used: &usedNodeIds)
+            let floorId = normalizedFloorId(node.floorId)
+            let draftNode = DraftRouteGraphNodeValue(
+                id: nodeId,
+                floorId: floorId,
+                kind: kind,
+                x: Double(node.geometry.center.x),
+                y: Double(node.geometry.center.z),
+                label: displayLabel(for: node, fallback: "\(kind) \(index + 1)"),
+                accessible: isAccessible(node),
+                verticalConnectorGroupId: verticalConnectorGroupId(for: node, kind: kind)
+            )
+            draftNodes.append(draftNode)
+            sourceNodeToDraftId[node.id] = draftNode.id
+
+            if let nearest = nearestRouteNode(to: draftNode, in: draftNodes.prefix(routeNodes.count)) {
+                draftEdges.append(makeDraftRouteEdge(source: nearest, target: draftNode))
+            }
+        }
+
+        let sourceDraftNodes = Dictionary(uniqueKeysWithValues: draftNodes.map { ($0.id, $0) })
+        for relation in graph.relations where relation.reviewStatus == "approved" && relation.attributes["accessible"] != "false" {
+            guard let sourceId = sourceNodeToDraftId[relation.sourceId],
+                  let targetId = sourceNodeToDraftId[relation.targetId],
+                  sourceId != targetId,
+                  let source = sourceDraftNodes[sourceId],
+                  let target = sourceDraftNodes[targetId],
+                  !draftEdges.contains(where: { ($0.source == sourceId && $0.target == targetId) || ($0.source == targetId && $0.target == sourceId) }) else {
+                continue
+            }
+            draftEdges.append(makeDraftRouteEdge(source: source, target: target))
+        }
+
         guard !draftEdges.isEmpty else { return nil }
         return DraftRouteGraphValue(nodes: draftNodes, edges: draftEdges)
     }
@@ -639,6 +690,146 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             accessible: source.accessible && target.accessible,
             kind: kind
         )
+    }
+
+    private func shouldIncludeInPublishedDraft(_ node: SceneGraphNodeValue) -> Bool {
+        guard !node.id.hasPrefix("trajectory:"),
+              !["floor", "space_sample"].contains(node.kind),
+              node.reviewStatus == "approved",
+              isAccessible(node),
+              node.attributes["hazard"] != "true",
+              node.attributes["restricted"] != "true" else {
+            return false
+        }
+        let kind = normalizedDraftNodeKind(node, fallback: "")
+        if ["room", "door", "stairs", "elevator"].contains(kind) { return true }
+        if node.attributes["destination_candidate"] == "true" { return true }
+        if node.attributes["candidate_role"] == "portal" { return true }
+        if node.attributes["candidate_role"] == "vertical_connector" { return true }
+        return false
+    }
+
+    private func draftSemanticPriority(_ node: SceneGraphNodeValue) -> Int {
+        let kind = normalizedDraftNodeKind(node, fallback: "")
+        if kind == "elevator" || kind == "stairs" { return 0 }
+        if kind == "door" { return 1 }
+        if node.attributes["destination_candidate"] == "true" { return 2 }
+        if kind == "room" { return 3 }
+        return 4
+    }
+
+    private func normalizedDraftNodeKind(_ node: SceneGraphNodeValue, fallback: String) -> String {
+        let text = [
+            node.attributes["node_type"],
+            node.attributes["suggested_kind"],
+            node.attributes["candidate_role"],
+            node.kind,
+            node.labels.first,
+            node.attributes["display_label"],
+            node.attributes["raw_label"]
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        if text.contains("elevator") || text.contains("엘리베이터") || text.contains("승강기") { return "elevator" }
+        if text.contains("stair") || text.contains("계단") { return "stairs" }
+        if text.contains("door") || text.contains("문") || text.contains("출입") || node.attributes["candidate_role"] == "portal" { return "door" }
+        if text.contains("room") || text.contains("restroom") || text.contains("reception") || text.contains("desk") || text.contains("실") || text.contains("방") || text.contains("호") { return "room" }
+        if ["entrance", "waypoint"].contains(fallback) { return fallback }
+        if node.attributes["destination_candidate"] == "true" { return "room" }
+        return fallback.isEmpty ? "room" : fallback
+    }
+
+    private func displayLabel(for node: SceneGraphNodeValue, fallback: String) -> String {
+        let candidates = [
+            node.attributes["display_label"],
+            node.attributes["room_label"],
+            node.attributes["destination_label"],
+            node.attributes["object_label"],
+            node.attributes["object_class"],
+            node.labels.first,
+            node.attributes["raw_label"],
+            node.attributes["node_type"],
+            node.attributes["suggested_kind"]
+        ]
+        for candidate in candidates {
+            let cleaned = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !cleaned.isEmpty,
+               !cleaned.hasPrefix("trajectory:"),
+               cleaned != "unknown",
+               cleaned != "object" {
+                return cleaned
+            }
+        }
+        return fallback
+    }
+
+    private func normalizedFloorId(_ value: String?) -> String {
+        let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return cleaned.isEmpty ? (floorName.isEmpty ? "1층" : floorName) : cleaned
+    }
+
+    private func isAccessible(_ node: SceneGraphNodeValue) -> Bool {
+        node.attributes["accessible"] != "false"
+            && node.attributes["restricted"] != "true"
+            && node.attributes["hazard"] != "true"
+    }
+
+    private func verticalConnectorGroupId(for node: SceneGraphNodeValue, kind: String) -> String? {
+        guard kind == "elevator" || kind == "stairs" else { return nil }
+        let candidates = [
+            node.attributes["vertical_connector_group_id"],
+            node.attributes["connector_group_id"],
+            displayLabel(for: node, fallback: kind)
+        ]
+        for candidate in candidates {
+            let normalized = normalizeConnectorGroup(candidate, kind: kind)
+            if normalized != nil { return normalized }
+        }
+        return nil
+    }
+
+    private func normalizeConnectorGroup(_ value: String?, kind: String) -> String? {
+        let cleaned = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "엘리베이터", with: "elevator")
+            .replacingOccurrences(of: "승강기", with: "elevator")
+            .replacingOccurrences(of: "계단", with: "stairs")
+            .replacingOccurrences(of: #"[^a-z0-9가-힣]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        guard let cleaned, !cleaned.isEmpty else { return nil }
+        return cleaned.hasPrefix(kind) ? cleaned : "\(kind)-\(cleaned)"
+    }
+
+    private func nearestRouteNode(to node: DraftRouteGraphNodeValue, in routeNodes: ArraySlice<DraftRouteGraphNodeValue>) -> DraftRouteGraphNodeValue? {
+        let sameFloor = routeNodes.filter { $0.floorId == node.floorId }
+        let candidates = sameFloor.isEmpty ? Array(routeNodes) : sameFloor
+        return candidates.min { lhs, rhs in
+            squaredDistance(lhs, node) < squaredDistance(rhs, node)
+        }
+    }
+
+    private func squaredDistance(_ lhs: DraftRouteGraphNodeValue, _ rhs: DraftRouteGraphNodeValue) -> Double {
+        let dx = lhs.x - rhs.x
+        let dy = lhs.y - rhs.y
+        return dx * dx + dy * dy
+    }
+
+    private func uniqueDraftNodeId(prefix: String, sourceId: String, index: Int, used: inout Set<String>) -> String {
+        let slug = sourceId
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9가-힣]+"#, with: "_", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let base = "\(prefix)_\(slug.isEmpty ? "\(index)" : slug)"
+        var candidate = base
+        var suffix = 2
+        while used.contains(candidate) {
+            candidate = "\(base)_\(suffix)"
+            suffix += 1
+        }
+        used.insert(candidate)
+        return candidate
     }
 
     private func trajectoryIndex(_ id: String) -> Int {

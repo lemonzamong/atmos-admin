@@ -3326,8 +3326,10 @@ private struct PrePublishChecklist: View {
             Label("게시 전 최종 확인", systemImage: isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                 .font(.headline.weight(.black))
                 .foregroundStyle(isReady ? AdminTheme.safe : AdminTheme.caution)
+            checklistRow("접근 가능한 출발점 1개 이상", ok: hasAccessibleStart)
             checklistRow("보행 경로 노드 2개 이상", ok: routeNodes.count >= 2)
             checklistRow("차단되지 않은 경로 연결 1개 이상", ok: publishablePathRelations >= 1)
+            checklistRow("승인된 목적지 1개 이상", ok: approvedDestinationNodes.count >= 1)
             checklistRow("계단·엘리베이터 층 정보 입력", ok: floorTransitionNodesReady)
             checklistRow("위험·출입 제한 후보 확인", ok: hazardAndRestrictedReviewed)
             if !blockingMessages.isEmpty {
@@ -3358,6 +3360,40 @@ private struct PrePublishChecklist: View {
         graph.relations.filter { $0.predicate == "scan_path_connected" && $0.reviewStatus != "rejected" && $0.attributes["accessible"] != "false" }.count
     }
 
+    private var hasAccessibleStart: Bool {
+        routeNodes.first { $0.attributes["accessible"] != "false" && $0.attributes["restricted"] != "true" } != nil
+    }
+
+    private var approvedDestinationNodes: [SceneGraphNodeValue] {
+        graph.nodes.filter { node in
+            guard !node.id.hasPrefix("trajectory:"),
+                  !["floor", "space_sample"].contains(node.kind),
+                  node.reviewStatus == "approved",
+                  node.attributes["accessible"] != "false",
+                  node.attributes["restricted"] != "true",
+                  node.attributes["hazard"] != "true" else {
+                return false
+            }
+            let text = [
+                node.attributes["node_type"],
+                node.attributes["suggested_kind"],
+                node.kind,
+                node.labels.first,
+                node.attributes["display_label"]
+            ]
+                .compactMap { $0 }
+                .joined(separator: " ")
+                .lowercased()
+            return node.attributes["destination_candidate"] == "true"
+                || text.contains("room")
+                || text.contains("restroom")
+                || text.contains("reception")
+                || text.contains("실")
+                || text.contains("방")
+                || text.contains("호")
+        }
+    }
+
     private var floorTransitionNodesReady: Bool {
         graph.nodes
             .filter { ["stairs", "elevator"].contains($0.kind) && $0.reviewStatus != "rejected" }
@@ -3371,16 +3407,27 @@ private struct PrePublishChecklist: View {
     }
 
     private var isReady: Bool {
-        routeNodes.count >= 2 && publishablePathRelations >= 1 && floorTransitionNodesReady && hazardAndRestrictedReviewed
+        hasAccessibleStart
+            && routeNodes.count >= 2
+            && publishablePathRelations >= 1
+            && approvedDestinationNodes.count >= 1
+            && floorTransitionNodesReady
+            && hazardAndRestrictedReviewed
     }
 
     private var blockingMessages: [String] {
         var messages: [String] = []
+        if !hasAccessibleStart {
+            messages.append("출발점으로 쓸 수 있는 접근 가능한 경로 노드가 필요합니다.")
+        }
         if routeNodes.count < 2 {
             messages.append("경로 노드가 부족합니다. 복도 중심 경로를 더 승인하세요.")
         }
         if publishablePathRelations < 1 {
             messages.append("사용 가능한 경로 연결이 없습니다. 연결 관계를 확인하세요.")
+        }
+        if approvedDestinationNodes.isEmpty {
+            messages.append("사용자가 선택할 목적지를 최소 1개 승인하세요.")
         }
         if !floorTransitionNodesReady {
             messages.append("계단·엘리베이터 노드의 층 이름을 입력하세요.")

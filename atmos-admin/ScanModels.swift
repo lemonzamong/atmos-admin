@@ -346,6 +346,7 @@ struct DraftRouteGraphNodeValue: Encodable {
     let y: Double
     let label: String
     let accessible: Bool
+    let verticalConnectorGroupId: String?
 }
 
 struct DraftRouteGraphEdgeValue: Encodable {
