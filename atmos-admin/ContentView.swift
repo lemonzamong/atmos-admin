@@ -3,13 +3,14 @@ import Contacts
 import CoreLocation
 import SceneKit
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var scanner = ScanController()
     @StateObject private var addressLocator = AdminAddressLocator()
-    @State private var buildingName = ""
-    @State private var address = ""
-    @State private var floorName = "1층"
+    @AppStorage("atmosAdminBuildingName") private var buildingName = ""
+    @AppStorage("atmosAdminAddress") private var address = ""
+    @AppStorage("atmosAdminFloorName") private var floorName = "1층"
     @State private var showsSpaceInfoSheet = false
     @State private var showsUploadInfoSheet = false
     @State private var showsSavedScans = false
@@ -535,6 +536,37 @@ struct ContentView: View {
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+                if let readiness = scanner.pipelineReadiness {
+                    Divider().opacity(0.5)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(readiness.isReady ? "AI 파이프라인 준비 완료" : "AI 파이프라인 점검 필요", systemImage: readiness.isReady ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                .font(.caption.weight(.black))
+                                .foregroundStyle(readinessColor(readiness.status))
+                            Spacer()
+                            Text(readiness.status.uppercased())
+                                .font(.caption2.monospacedDigit().weight(.black))
+                                .foregroundStyle(readinessColor(readiness.status))
+                        }
+                        ForEach(readiness.items) { item in
+                            HStack(alignment: .top, spacing: 8) {
+                                Circle()
+                                    .fill(readinessColor(item.status))
+                                    .frame(width: 8, height: 8)
+                                    .padding(.top, 5)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(readinessComponentTitle(item.component))
+                                        .font(.caption.weight(.black))
+                                        .foregroundStyle(AdminTheme.ink)
+                                    Text(item.message)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 Text("새로고침을 누르면 Lightsail API, DGX worker, VLM, VGGT, 작업 대기열 상태를 확인합니다.")
                     .font(.footnote.weight(.semibold))
@@ -571,6 +603,25 @@ struct ContentView: View {
             Text(value)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func readinessColor(_ status: String) -> Color {
+        switch status {
+        case "ok": AdminTheme.safe
+        case "warning", "degraded": AdminTheme.caution
+        default: AdminTheme.danger
+        }
+    }
+
+    private func readinessComponentTitle(_ component: String) -> String {
+        switch component {
+        case "dgx_worker": "DGX worker"
+        case "vggt_geometry": "VGGT 위치·깊이"
+        case "roomformer_floorplan": "RoomFormer 평면도"
+        case "research_scene_graph": "장면 그래프"
+        case "published_packages": "사용자 패키지"
+        default: component
         }
     }
 
@@ -1075,6 +1126,32 @@ struct ContentView: View {
                     reviewStat("목적지", "\(semanticReviewNodes(in: graph).count)", AdminTheme.violet)
                     reviewStat("경로", "\(routeWaypointCount(in: graph))", AdminTheme.route)
                 }
+                BEVMapPreview(
+                    graph: graph,
+                    manifest: scanner.bevMapManifest,
+                    imageURL: scanner.bevOccupancyImageURL,
+                    isDownloading: scanner.isDownloadingBEVMap
+                ) {
+                    Task { await scanner.refreshBEVMapAsset() }
+                }
+                    .frame(height: 300)
+                if let validation = scanner.mapValidation, !validation.issues.isEmpty {
+                    MapValidationNotice(validation: validation)
+                } else if scanner.bevMapManifest?.isFallback == true {
+                    Label("RoomFormer 계열 백엔드 대신 fallback 2D 지도가 생성되었습니다. 게시 전 벽과 경로를 확인하세요.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout.weight(.bold))
+                        .foregroundStyle(AdminTheme.caution)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(AdminTheme.caution.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                DraftMapStatusBar(
+                    revision: scanner.draftMapRevision,
+                    saveState: scanner.draftMapSaveState,
+                    validation: scanner.mapValidation
+                ) {
+                    Task { await scanner.saveAndValidateReviewedDraft() }
+                }
                 DigitalTwinPreview(
                     graph: graph,
                     manifest: scanner.digitalTwinManifest,
@@ -1248,7 +1325,16 @@ struct ContentView: View {
             .filter { !$0.isWhitespace }
         guard !query.isEmpty else { return nodes }
         return nodes.filter { node in
-            let searchable = ([node.id, node.kind, node.floorId ?? ""] + node.labels)
+            let searchable = (
+                [node.id, node.kind, node.floorId ?? ""] +
+                node.labels +
+                [
+                    node.attributes["display_label"],
+                    node.attributes["node_type"],
+                    node.attributes["suggested_kind"],
+                    node.attributes["raw_label"]
+                ].compactMap { $0 }
+            )
                 .joined(separator: " ")
                 .lowercased()
                 .filter { !$0.isWhitespace }
@@ -1870,7 +1956,7 @@ private struct MapCandidateMarker: View {
                 .background(color, in: Circle())
                 .overlay(Circle().stroke(.white, lineWidth: 2))
                 .shadow(color: color.opacity(0.28), radius: 7, y: 4)
-            Text(node.labels.first ?? node.id)
+            Text(node.displayName)
                 .font(.caption2.weight(.black))
                 .foregroundStyle(AdminTheme.ink)
                 .lineLimit(1)
@@ -1879,7 +1965,7 @@ private struct MapCandidateMarker: View {
                 .background(.white.opacity(0.88), in: Capsule())
         }
         .frame(width: 92)
-        .accessibilityLabel("\(node.labels.first ?? node.id) 후보")
+        .accessibilityLabel("\(node.displayName) 후보")
     }
 
     private var color: Color {
@@ -1898,6 +1984,384 @@ private struct MapCandidateMarker: View {
         case "room": return "mappin.and.ellipse"
         default: return node.attributes["hazard"] == "true" ? "exclamationmark" : "sparkle"
         }
+    }
+}
+
+private struct BEVMapPreview: View {
+    let graph: SceneGraphValue?
+    let manifest: BEVMapManifestValue?
+    let imageURL: URL?
+    let isDownloading: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("2D 버드아이뷰 지도", systemImage: "square.grid.3x3")
+                    .font(.headline.weight(.black))
+                Spacer()
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.headline.weight(.bold))
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(.plain)
+                .background(.white.opacity(0.92), in: Circle())
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(Color.white.opacity(0.72))
+                if let imageURL,
+                   let image = UIImage(contentsOfFile: imageURL.path) {
+                    GeometryReader { proxy in
+                        ZStack {
+                            Image(uiImage: image)
+                                .resizable()
+                                .interpolation(.none)
+                                .scaledToFit()
+                                .padding(14)
+                            bevOverlay(in: proxy.size)
+                        }
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        if isDownloading {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "map")
+                                .font(.system(size: 34, weight: .bold))
+                        }
+                        Text(statusText)
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(AdminTheme.mutedInk)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(20)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if let manifest, manifest.isCompleted {
+                    HStack(spacing: 10) {
+                        metric("격자", "\(manifest.width)x\(manifest.height)")
+                        metric("해상도", String(format: "%.0fcm", manifest.resolutionM * 100))
+                        metric("경로", "\(manifest.routeNodes.count)")
+                        metric("품질", String(format: "%.0f", manifest.qualityScore * 100))
+                    }
+                    .padding(10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(12)
+                }
+            }
+            if let warnings = manifest?.qualityWarnings, !warnings.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("BEV 품질 확인 필요", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.black))
+                        .foregroundStyle(AdminTheme.caution)
+                    ForEach(warnings.prefix(3), id: \.self) { warning in
+                        Text(bevWarningText(warning))
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(AdminTheme.mutedInk)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AdminTheme.caution.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+        }
+        .padding(16)
+        .background(AdminTheme.surface, in: RoundedRectangle(cornerRadius: 26))
+    }
+
+    private var statusText: String {
+        guard let manifest else { return "BEV 맵 상태를 불러오는 중입니다" }
+        if manifest.status == "failed" {
+            return manifest.errorMessage ?? "BEV 맵 생성에 실패했습니다"
+        }
+        if isDownloading { return "서버에서 2D 맵을 내려받는 중입니다" }
+        return "BEV 맵 생성이 아직 완료되지 않았습니다"
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 1) {
+            Text(value)
+                .font(.caption.weight(.black))
+                .foregroundStyle(AdminTheme.ink)
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(AdminTheme.mutedInk)
+        }
+    }
+
+    @ViewBuilder private func bevOverlay(in size: CGSize) -> some View {
+        if let manifest, manifest.isCompleted {
+            let rect = fittedMapRect(in: size, manifest: manifest)
+            ZStack {
+                ForEach(manifest.routeEdges) { edge in
+                    if let source = manifest.routeNodes.first(where: { $0.id == edge.source }),
+                       let target = manifest.routeNodes.first(where: { $0.id == edge.target }) {
+                        Path { path in
+                            path.move(to: point(for: source, in: rect, manifest: manifest))
+                            path.addLine(to: point(for: target, in: rect, manifest: manifest))
+                        }
+                        .stroke(edge.accessible ? AdminTheme.route.opacity(0.82) : AdminTheme.danger.opacity(0.70), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                    }
+                }
+                ForEach(manifest.routeNodes.prefix(80)) { node in
+                    Circle()
+                        .fill(routeNodeColor(node))
+                        .frame(width: node.kind == "destination" ? 12 : 8, height: node.kind == "destination" ? 12 : 8)
+                        .overlay(Circle().stroke(.white, lineWidth: 2))
+                        .position(point(for: node, in: rect, manifest: manifest))
+                }
+                ForEach(overlayNodes.prefix(24)) { node in
+                    BEVTagMarker(node: node)
+                        .position(point(for: node, in: rect, manifest: manifest))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var overlayNodes: [SceneGraphNodeValue] {
+        guard let graph else { return [] }
+        return graph.nodes
+            .filter { !$0.id.hasPrefix("trajectory:") && !["floor", "space_sample"].contains($0.kind) && $0.reviewStatus != "rejected" }
+            .sorted { lhs, rhs in
+                let lhsPriority = overlayPriority(lhs)
+                let rhsPriority = overlayPriority(rhs)
+                if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                return lhs.semanticConfidence > rhs.semanticConfidence
+            }
+    }
+
+    private func overlayPriority(_ node: SceneGraphNodeValue) -> Int {
+        if node.attributes["hazard"] == "true" { return 0 }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" { return 1 }
+        let kind = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
+        if ["door", "elevator", "stairs", "escalator"].contains(kind) { return 2 }
+        if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" { return 3 }
+        return 4
+    }
+
+    private func routeNodeColor(_ node: BEVRouteNodeValue) -> Color {
+        switch node.kind {
+        case "door": return AdminTheme.caution
+        case "elevator", "stairs": return AdminTheme.violet
+        case "destination": return AdminTheme.safe
+        default: return AdminTheme.route
+        }
+    }
+
+    private func fittedMapRect(in size: CGSize, manifest: BEVMapManifestValue) -> CGRect {
+        let inset: CGFloat = 14
+        let available = CGSize(width: max(size.width - inset * 2, 1), height: max(size.height - inset * 2, 1))
+        let aspect = CGFloat(max(manifest.width, 1)) / CGFloat(max(manifest.height, 1))
+        let availableAspect = available.width / max(available.height, 1)
+        let fittedSize: CGSize
+        if availableAspect > aspect {
+            fittedSize = CGSize(width: available.height * aspect, height: available.height)
+        } else {
+            fittedSize = CGSize(width: available.width, height: available.width / max(aspect, 0.01))
+        }
+        return CGRect(
+            x: inset + (available.width - fittedSize.width) / 2,
+            y: inset + (available.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+    }
+
+    private func point(for routeNode: BEVRouteNodeValue, in rect: CGRect, manifest: BEVMapManifestValue) -> CGPoint {
+        let xRatio = CGFloat(routeNode.gridX) / CGFloat(max(manifest.width - 1, 1))
+        let yRatio = CGFloat(routeNode.gridY) / CGFloat(max(manifest.height - 1, 1))
+        return CGPoint(x: rect.minX + rect.width * xRatio, y: rect.minY + rect.height * (1 - yRatio))
+    }
+
+    private func point(for node: SceneGraphNodeValue, in rect: CGRect, manifest: BEVMapManifestValue) -> CGPoint {
+        let gridX = (Double(node.geometry.center.x) - manifest.originX) / max(manifest.resolutionM, 0.001)
+        let gridY = (Double(node.geometry.center.z) - manifest.originY) / max(manifest.resolutionM, 0.001)
+        let xRatio = CGFloat(min(max(gridX / Double(max(manifest.width - 1, 1)), 0), 1))
+        let yRatio = CGFloat(min(max(gridY / Double(max(manifest.height - 1, 1)), 0), 1))
+        return CGPoint(x: rect.minX + rect.width * xRatio, y: rect.minY + rect.height * (1 - yRatio))
+    }
+
+    private func bevWarningText(_ warning: String) -> String {
+        switch warning {
+        case "free_space_too_small": "이동 가능 영역이 작습니다"
+        case "coverage_too_sparse": "미확인 영역이 많습니다"
+        case "structure_evidence_too_weak": "벽과 문틀 증거가 약합니다"
+        case "route_nodes_too_few": "경로 지점이 부족합니다"
+        case "scan_distance_short_for_floorplan": "스캔 이동 거리가 짧습니다"
+        case "route_crosses_occupied_cells": "경로가 막힌 영역을 지납니다"
+        case "fallback_floorplan_prior": "추정 평면도라 수동 검수가 필요합니다"
+        case "floorplan_prior_dominates": "추정으로 채운 영역이 너무 많습니다"
+        case "scan_tracking_unstable": "카메라 추적이 불안정했습니다"
+        case "keyframes_insufficient_for_reconstruction": "3D 복원용 핵심 화면이 부족합니다"
+        case "scan_motion_too_fast": "스캔 이동 또는 회전이 너무 빨랐습니다"
+        case "scan_low_light": "조도가 낮은 구간이 많습니다"
+        case "scan_path_degenerate": "제자리 회전 위주라 공간 범위가 부족합니다"
+        case "sensor_fingerprint_sparse": "자기장·기압 샘플이 부족합니다"
+        case "bev_unusable": "재스캔 또는 수동 편집이 필요합니다"
+        default: warning
+        }
+    }
+}
+
+private struct BEVTagMarker: View {
+    let node: SceneGraphNodeValue
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.caption2.weight(.black))
+            Text(node.displayName)
+                .font(.caption2.weight(.black))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(maxWidth: 118)
+        .background(color.opacity(0.95), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.92), lineWidth: 1.5))
+        .shadow(color: color.opacity(0.28), radius: 7, y: 3)
+    }
+
+    private var color: Color {
+        if node.attributes["hazard"] == "true" { return AdminTheme.danger }
+        if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" { return AdminTheme.caution }
+        let kind = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
+        if ["door", "elevator", "stairs", "escalator"].contains(kind) { return AdminTheme.violet }
+        if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" { return AdminTheme.safe }
+        return AdminTheme.ink.opacity(0.78)
+    }
+
+    private var symbol: String {
+        let kind = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
+        switch kind {
+        case "door": return "door.left.hand.open"
+        case "elevator": return "arrow.up.arrow.down"
+        case "stairs", "escalator": return "stairs"
+        case "room": return "mappin.and.ellipse"
+        default: return node.attributes["hazard"] == "true" ? "exclamationmark.triangle.fill" : "tag.fill"
+        }
+    }
+}
+
+private extension SceneGraphNodeValue {
+    var displayName: String {
+        let candidates = [
+            attributes["display_label"],
+            attributes["room_label"],
+            attributes["destination_label"],
+            attributes["object_label"],
+            attributes["object_class"],
+            labels.first,
+            attributes["raw_label"],
+            attributes["node_type"],
+            attributes["suggested_kind"]
+        ]
+        for candidate in candidates {
+            if let cleaned = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !cleaned.isEmpty,
+               !cleaned.hasPrefix("trajectory:"),
+               cleaned != "unknown",
+               cleaned != "object" {
+                return cleaned
+            }
+        }
+        return id
+    }
+}
+
+private struct MapValidationNotice: View {
+    let validation: MapValidationResultValue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(validation.publishable ? "게시 전 검증 경고" : "게시 전 검증 실패", systemImage: validation.publishable ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
+                .font(.headline.weight(.black))
+                .foregroundStyle(validation.publishable ? AdminTheme.caution : AdminTheme.danger)
+            ForEach(validation.issues.prefix(5)) { issue in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: issue.severity == "blocking" ? "xmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(issue.severity == "blocking" ? AdminTheme.danger : AdminTheme.caution)
+                    Text(issue.message)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(AdminTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((validation.publishable ? AdminTheme.caution : AdminTheme.danger).opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private struct DraftMapStatusBar: View {
+    let revision: Int?
+    let saveState: String?
+    let validation: MapValidationResultValue?
+    let onSaveAndValidate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3.weight(.black))
+                .foregroundStyle(color)
+                .frame(width: 34, height: 34)
+                .background(color.opacity(0.12), in: Circle())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline.weight(.black))
+                    .foregroundStyle(AdminTheme.ink)
+                Text(subtitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AdminTheme.mutedInk)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button(action: onSaveAndValidate) {
+                Label("저장·검증", systemImage: "checkmark.shield.fill")
+                    .font(.callout.weight(.black))
+            }
+            .buttonStyle(AdminSecondaryButtonStyle())
+        }
+        .padding(14)
+        .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(color.opacity(0.22), lineWidth: 1.2))
+    }
+
+    private var title: String {
+        if validation?.publishable == true { return "게시 가능 검증 완료" }
+        if revision != nil { return "검수 초안 저장됨" }
+        return "검수 초안 미저장"
+    }
+
+    private var subtitle: String {
+        if let revision {
+            let base = saveState ?? "\(revision)판 저장됨"
+            if let validation, !validation.publishable {
+                let blockers = validation.issues.filter { $0.severity == "blocking" }.count
+                return blockers > 0 ? "\(base) · 차단 항목 \(blockers)개 확인 필요" : "\(base) · 경고 확인 필요"
+            }
+            return base
+        }
+        return "fallback 지도는 저장·검증을 통과해야 사용자 앱에 게시됩니다"
+    }
+
+    private var icon: String {
+        if validation?.publishable == true { return "checkmark.seal.fill" }
+        if revision != nil { return "doc.badge.gearshape.fill" }
+        return "square.and.arrow.down"
+    }
+
+    private var color: Color {
+        if validation?.publishable == true { return AdminTheme.safe }
+        if revision != nil { return AdminTheme.caution }
+        return AdminTheme.violet
     }
 }
 
@@ -3188,7 +3652,7 @@ private struct ReviewNodeRow: View {
     ) {
         self.node = node
         self.onSave = onSave
-        _labelText = State(initialValue: node.attributes["display_label"] ?? node.labels.first ?? node.id)
+        _labelText = State(initialValue: node.displayName)
         _kindText = State(initialValue: node.attributes["suggested_kind"] ?? node.kind)
         _floorText = State(initialValue: node.floorId ?? "")
     }

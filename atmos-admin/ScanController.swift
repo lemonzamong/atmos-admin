@@ -73,6 +73,13 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published private(set) var digitalTwinManifest: DigitalTwinAssetManifestValue?
     @Published private(set) var digitalTwinPointCloudURL: URL?
     @Published private(set) var isDownloadingDigitalTwin = false
+    @Published private(set) var bevMapManifest: BEVMapManifestValue?
+    @Published private(set) var bevOccupancyImageURL: URL?
+    @Published private(set) var isDownloadingBEVMap = false
+    @Published private(set) var scanStatus: ScanStatusValue?
+    @Published private(set) var mapValidation: MapValidationResultValue?
+    @Published private(set) var draftMapRevision: Int?
+    @Published private(set) var draftMapSaveState: String?
     @Published private(set) var uploadedBuildingID: UUID?
     @Published private(set) var uploadedSessionID: UUID?
     @Published private(set) var packageVersions: [PackageVersionInfoValue] = []
@@ -80,6 +87,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published private(set) var localDrafts: [LocalScanDraft] = []
     @Published private(set) var isRefreshingServerJobs = false
     @Published private(set) var systemStatus: AdminSystemStatusValue?
+    @Published private(set) var pipelineReadiness: PipelineReadinessResponseValue?
     @Published private(set) var isRefreshingSystemStatus = false
 
     private var samples: [PoseSampleValue] = []
@@ -102,14 +110,19 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private var lastKeyframeTime: TimeInterval = -.infinity
     private var lastKeyframePosition: SIMD3<Float>?
     private var lastKeyframeRotation: simd_quatf?
-    private var maxKeyframeCount = 72
+    private var maxKeyframeCount = 240
+    private var lastLocalAutosaveTime: TimeInterval = -.infinity
     private var meshAnchors: [UUID: ARMeshAnchor] = [:]
     private var planeAnchors: [UUID: ARPlaneAnchor] = [:]
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private let apiClient = AdminAPIClient()
     private let motion = CMMotionManager()
+    private let altimeter = CMAltimeter()
     private let locationManager = CLLocationManager()
     private var latestMagneticYawDegrees: Double?
+    private var latestMagneticField: CMCalibratedMagneticField?
+    private var latestPressureKpa: Double?
+    private var latestRelativeAltitudeM: Double?
     private var hasCapturedNorthOffset = false
     private let fileManager = FileManager.default
 
@@ -161,11 +174,15 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         scanLongitude = nil
         scanHorizontalAccuracyM = nil
         latestMagneticYawDegrees = nil
+        latestMagneticField = nil
+        latestPressureKpa = nil
+        latestRelativeAltitudeM = nil
         hasCapturedNorthOffset = false
         lastKeyframeTime = -.infinity
         lastKeyframePosition = nil
         lastKeyframeRotation = nil
-        maxKeyframeCount = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) ? 72 : 96
+        lastLocalAutosaveTime = -.infinity
+        maxKeyframeCount = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) ? 180 : 320
         previousPosition = nil
         previousSamplePosition = nil
         previousSampleRotation = nil
@@ -179,9 +196,14 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         reviewGraph = nil
         digitalTwinManifest = nil
         digitalTwinPointCloudURL = nil
+        bevMapManifest = nil
+        bevOccupancyImageURL = nil
+        scanStatus = nil
+        mapValidation = nil
         message = "먼저 제자리에서 문, 표지판, 벽 모서리, 바닥 경계를 천천히 훑어 주세요."
         startedAt = Date()
         startMotionHeadingUpdates()
+        startBarometerUpdates()
         startLocationUpdates()
 
         let configuration = ARWorldTrackingConfiguration()
@@ -206,6 +228,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         guard status == .scanning, let startedAt else { return }
         session.pause()
         motion.stopDeviceMotionUpdates()
+        altimeter.stopRelativeAltitudeUpdates()
         locationManager.stopUpdatingLocation()
         guard samples.count >= 2 else {
             status = .failed
@@ -255,7 +278,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         saveLocalDraftIfNeeded()
         refreshLocalDrafts()
         status = .captured
-        message = "스캔 경로를 저장했습니다. 서버가 3D 디지털트윈과 사용자용 2D 지도를 만든 뒤 검수할 수 있습니다."
+        message = "스캔 경로를 로컬에 저장했습니다. 서버가 3D 디지털트윈과 사용자용 2D 지도를 만든 뒤 검수할 수 있습니다."
     }
 
     func refreshLocalDrafts() {
@@ -411,8 +434,10 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         defer { isRefreshingSystemStatus = false }
         do {
             systemStatus = try await apiClient.systemStatus()
+            pipelineReadiness = try await apiClient.pipelineReadiness()
         } catch {
             systemStatus = nil
+            pipelineReadiness = nil
             message = error.localizedDescription
         }
     }
@@ -429,6 +454,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             case "review_required":
                 reviewGraph = try await apiClient.sceneGraph(buildingID: job.buildingId, sessionID: job.scanSessionId)
                 try await loadDigitalTwinAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
+                try await loadBEVMapAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
                 packageVersions = try await apiClient.packageVersions(buildingID: job.buildingId)
                 status = .uploaded
                 message = "검수 대기 작업을 불러왔습니다. 공간 노드와 연결을 확인한 뒤 게시하세요."
@@ -439,6 +465,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 if let graph = try? await apiClient.sceneGraph(buildingID: job.buildingId, sessionID: job.scanSessionId) {
                     reviewGraph = graph
                     try await loadDigitalTwinAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
+                    try await loadBEVMapAsset(buildingID: job.buildingId, sessionID: job.scanSessionId)
                     packageVersions = try await apiClient.packageVersions(buildingID: job.buildingId)
                     status = .uploaded
                     message = "기존 공간 검수 데이터를 불러왔습니다. 목적지 이름을 수정한 뒤 다시 게시하세요."
@@ -463,6 +490,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 if let uploadedBuildingID, let uploadedSessionID {
                     reviewGraph = try await apiClient.sceneGraph(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
                     try await loadDigitalTwinAsset(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
+                    try await loadBEVMapAsset(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
                 }
                 status = .uploaded
                 return
@@ -479,9 +507,19 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     func publishReviewedScan() async {
         guard let uploadedBuildingID, let uploadedSessionID else { return }
         status = .uploading
-        message = "검수한 스캔을 사용자 앱용 지도 패키지로 게시하고 있습니다."
+        message = "게시 전 지도 품질과 경로 그래프를 검증하고 있습니다."
         do {
-            let receipt = try await apiClient.publish(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
+            try await saveReviewedDraft(comment: "manual_review_confirmed: publish_requested")
+            let validation = try await apiClient.validateSpace(sessionID: uploadedSessionID)
+            mapValidation = validation
+            guard validation.publishable else {
+                let blockers = validation.issues.filter { $0.severity == "blocking" }.map(\.message).joined(separator: " / ")
+                throw APIError.processingFailed(blockers.isEmpty ? "게시 전 검증에 실패했습니다." : blockers)
+            }
+            message = validation.issues.isEmpty
+                ? "검증을 통과했습니다. 사용자 앱용 지도 패키지를 게시하고 있습니다."
+                : "경고가 있지만 게시 가능한 상태입니다. 사용자 앱용 지도 패키지를 게시하고 있습니다."
+            let receipt = try await apiClient.publishSpace(sessionID: uploadedSessionID)
             packageVersions = try await apiClient.packageVersions(buildingID: uploadedBuildingID)
             status = .uploaded
             message = "지도 \(receipt.version)판을 게시했습니다. 노드 \(receipt.nodeCount)개, 연결 \(receipt.edgeCount)개가 사용자 앱에 배포됩니다."
@@ -489,6 +527,122 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             status = .failed
             message = error.localizedDescription
         }
+    }
+
+    @MainActor
+    func saveAndValidateReviewedDraft() async {
+        guard let uploadedSessionID else { return }
+        status = .uploading
+        message = "검수한 2D 지도 초안을 서버에 저장하고 있습니다."
+        do {
+            try await saveReviewedDraft(comment: "manual_review_confirmed: admin_saved_and_validated")
+            let validation = try await apiClient.validateSpace(sessionID: uploadedSessionID)
+            mapValidation = validation
+            status = .uploaded
+            if validation.publishable {
+                message = "검수 초안이 저장됐고 게시 가능한 상태입니다."
+            } else {
+                let blockers = validation.issues.filter { $0.severity == "blocking" }.map(\.message).joined(separator: " / ")
+                message = blockers.isEmpty ? "검수 초안은 저장됐지만 경고를 확인해야 합니다." : blockers
+            }
+        } catch {
+            status = .failed
+            message = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func persistReviewedDraftAfterEdit() async {
+        do {
+            try await saveReviewedDraft(comment: "manual_review_confirmed: admin_edit_autosave")
+            if let uploadedSessionID {
+                mapValidation = try? await apiClient.validateSpace(sessionID: uploadedSessionID)
+            }
+        } catch {
+            draftMapSaveState = "초안 저장 실패"
+            message = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func saveReviewedDraft(comment: String) async throws {
+        guard let uploadedSessionID else { return }
+        guard let graph = reviewGraph, let draftRoute = makeDraftRouteGraph(from: graph) else {
+            throw APIError.processingFailed("저장할 검수 경로가 없습니다. 경로 노드가 2개 이상 필요합니다.")
+        }
+        draftMapSaveState = "저장 중"
+        let draft = try await apiClient.saveDraftMap(
+            sessionID: uploadedSessionID,
+            routeGraph: draftRoute,
+            comment: comment
+        )
+        draftMapRevision = draft.revision
+        draftMapSaveState = "\(draft.revision)판 저장됨"
+    }
+
+    private func makeDraftRouteGraph(from graph: SceneGraphValue) -> DraftRouteGraphValue? {
+        let routeNodes = graph.nodes
+            .filter { $0.id.hasPrefix("trajectory:") && $0.reviewStatus != "rejected" }
+            .sorted { lhs, rhs in trajectoryIndex(lhs.id) < trajectoryIndex(rhs.id) }
+        guard routeNodes.count >= 2 else { return nil }
+        let draftNodes = routeNodes.enumerated().map { index, node in
+            DraftRouteGraphNodeValue(
+                id: "review_wp_\(index + 1)",
+                floorId: node.floorId ?? "1층",
+                kind: index == 0 ? "entrance" : (index == routeNodes.count - 1 ? "room" : "waypoint"),
+                x: Double(node.geometry.center.x),
+                y: Double(node.geometry.center.z),
+                label: node.labels.first ?? (index == 0 ? "출발 지점" : "검수 경로 \(index + 1)"),
+                accessible: node.attributes["accessible"] != "false" && node.attributes["restricted"] != "true"
+            )
+        }
+        let indexBySourceID = Dictionary(uniqueKeysWithValues: routeNodes.enumerated().map { ($0.element.id, $0.offset) })
+        var draftEdges: [DraftRouteGraphEdgeValue] = []
+        let approvedPathRelations = graph.relations.filter {
+            $0.predicate == "scan_path_connected"
+            && $0.reviewStatus != "rejected"
+            && $0.attributes["accessible"] != "false"
+        }
+        if approvedPathRelations.isEmpty {
+            for index in 0..<(draftNodes.count - 1) {
+                draftEdges.append(makeDraftRouteEdge(source: draftNodes[index], target: draftNodes[index + 1]))
+            }
+        } else {
+            for relation in approvedPathRelations {
+                guard let sourceIndex = indexBySourceID[relation.sourceId],
+                      let targetIndex = indexBySourceID[relation.targetId],
+                      sourceIndex != targetIndex else { continue }
+                draftEdges.append(makeDraftRouteEdge(source: draftNodes[sourceIndex], target: draftNodes[targetIndex]))
+            }
+        }
+        guard !draftEdges.isEmpty else { return nil }
+        return DraftRouteGraphValue(nodes: draftNodes, edges: draftEdges)
+    }
+
+    private func makeDraftRouteEdge(source: DraftRouteGraphNodeValue, target: DraftRouteGraphNodeValue) -> DraftRouteGraphEdgeValue {
+        let dx = source.x - target.x
+        let dy = source.y - target.y
+        let distance = max((dx * dx + dy * dy).squareRoot(), 0.1)
+        let kind: String
+        if source.floorId == target.floorId {
+            kind = source.kind == "door" || target.kind == "door" ? "door" : "corridor"
+        } else if source.kind == "stairs" || target.kind == "stairs" {
+            kind = "stairs"
+        } else {
+            kind = "elevator"
+        }
+        return DraftRouteGraphEdgeValue(
+            source: source.id,
+            target: target.id,
+            distanceM: distance,
+            bidirectional: true,
+            accessible: source.accessible && target.accessible,
+            kind: kind
+        )
+    }
+
+    private func trajectoryIndex(_ id: String) -> Int {
+        Int(id.split(separator: ":").last ?? "") ?? 0
     }
 
     @MainActor
@@ -549,8 +703,9 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             }
 
             reviewGraph = graph
+            try await saveReviewedDraft(comment: "manual_review_confirmed: recommended_candidates_saved")
             status = .uploaded
-            message = "AI 추천 후보를 승인했습니다. 필요한 목적지 이름만 수정한 뒤 게시하세요."
+            message = "AI 추천 후보와 2D 지도 초안을 저장했습니다. 필요한 목적지 이름만 수정한 뒤 게시하세요."
             if publishAfterApproval {
                 await publishReviewedScan()
             }
@@ -614,6 +769,48 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         message = "디지털트윈 point cloud \(manifest.pointCount)점을 불러왔습니다."
     }
 
+    func refreshBEVMapAsset() async {
+        guard let uploadedBuildingID, let uploadedSessionID else { return }
+        do {
+            try await loadBEVMapAsset(buildingID: uploadedBuildingID, sessionID: uploadedSessionID)
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    private func loadBEVMapAsset(buildingID: UUID, sessionID: UUID) async throws {
+        scanStatus = try? await apiClient.scanStatus(sessionID: sessionID)
+        let manifest = try await apiClient.bevMap(buildingID: buildingID, sessionID: sessionID)
+        bevMapManifest = manifest
+        guard manifest.isCompleted else {
+            bevOccupancyImageURL = nil
+            if manifest.status == "failed" {
+                message = manifest.errorMessage ?? "BEV 맵 생성에 실패했습니다."
+            } else if manifest.status == "needs_rescan" {
+                message = manifest.errorMessage ?? "2D 지도 품질이 낮아 재스캔이 필요합니다."
+            }
+            return
+        }
+        let cachedURL = bevMapCacheURL(for: manifest)
+        if fileManager.fileExists(atPath: cachedURL.path) {
+            bevOccupancyImageURL = cachedURL
+            return
+        }
+        isDownloadingBEVMap = true
+        defer { isDownloadingBEVMap = false }
+        message = "서버에서 2D 버드아이뷰 맵을 내려받고 있습니다."
+        let temporaryURL = try await apiClient.downloadBEVOccupancy(manifest)
+        try fileManager.createDirectory(at: bevMapCacheRoot, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: cachedURL.path) {
+            try fileManager.removeItem(at: cachedURL)
+        }
+        try fileManager.moveItem(at: temporaryURL, to: cachedURL)
+        bevOccupancyImageURL = cachedURL
+        message = manifest.isFallback
+            ? "2D 지도는 fallback으로 생성되었습니다. 벽, 문, 경로를 검수한 뒤 게시하세요."
+            : "2D BEV 맵 \(manifest.width)x\(manifest.height)을 불러왔습니다."
+    }
+
     private var digitalTwinCacheRoot: URL {
         fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appending(path: "AtmosDigitalTwins", directoryHint: .isDirectory)
@@ -621,6 +818,15 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
 
     private func digitalTwinCacheURL(for manifest: DigitalTwinAssetManifestValue) -> URL {
         digitalTwinCacheRoot.appending(path: "\(manifest.assetId.uuidString).ply")
+    }
+
+    private var bevMapCacheRoot: URL {
+        fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: "AtmosBEVMaps", directoryHint: .isDirectory)
+    }
+
+    private func bevMapCacheURL(for manifest: BEVMapManifestValue) -> URL {
+        bevMapCacheRoot.appending(path: "\(manifest.mapId.uuidString)-occupancy.png")
     }
 
     @MainActor
@@ -694,7 +900,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                     hazard: hazard
                 )
             )
-            message = "검수 변경 사항을 저장했습니다."
+            await persistReviewedDraftAfterEdit()
+            message = "검수 변경 사항과 2D 지도 초안을 저장했습니다."
         } catch {
             message = error.localizedDescription
         }
@@ -710,7 +917,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 relation: relation,
                 reviewStatus: reviewStatus
             )
-            message = "관계 검수 변경 사항을 저장했습니다."
+            await persistReviewedDraftAfterEdit()
+            message = "관계 검수 변경 사항과 2D 지도 초안을 저장했습니다."
         } catch {
             message = error.localizedDescription
         }
@@ -727,7 +935,8 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 reviewStatus: relation.reviewStatus,
                 accessible: accessible
             )
-            message = "연결 접근성 변경 사항을 저장했습니다."
+            await persistReviewedDraftAfterEdit()
+            message = "연결 접근성과 2D 지도 초안을 저장했습니다."
         } catch {
             message = error.localizedDescription
         }
@@ -888,7 +1097,13 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 ambientIntensity: ambientIntensity,
                 motionSpeedMps: motionSpeed,
                 angularSpeedDps: angularSpeed,
-                trackingQuality: trackingQuality
+                trackingQuality: trackingQuality,
+                magneticFieldX: latestMagneticField?.field.x,
+                magneticFieldY: latestMagneticField?.field.y,
+                magneticFieldZ: latestMagneticField?.field.z,
+                magneticFieldAccuracy: latestMagneticField.map { Int($0.accuracy.rawValue) },
+                pressureKpa: latestPressureKpa,
+                relativeAltitudeM: latestRelativeAltitudeM
             )
         )
         sampleCount = samples.count
@@ -906,6 +1121,7 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         previousSampleRotation = quaternion
         previousSampleTimestamp = frame.timestamp
         captureKeyframeIfNeeded(frame: frame, position: position, trackingState: trackingState, trackingQuality: trackingQuality)
+        autosaveLocalScanIfNeeded(frameTimestamp: frame.timestamp)
     }
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
@@ -1090,23 +1306,24 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if samples.count < 24 {
             failures.append("정확한 삼차원 지도를 만들 표본이 부족합니다. 시작점을 다시 잡고 10초 이상 천천히 스캔해 주세요.")
         }
-        if capturedKeyframes.count < 20 {
-            failures.append("삼차원 재구성용 핵심 화면이 부족합니다. 벽, 바닥, 문, 표지판, 코너를 여러 각도에서 더 오래 훑어 주세요.")
+        let requiredKeyframes = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) ? 48 : 96
+        if capturedKeyframes.count < requiredKeyframes {
+            failures.append("삼차원 재구성용 화면이 부족합니다. 방 둘레를 따라 벽, 바닥, 문, 표지판, 코너를 여러 각도에서 더 오래 훑어 주세요.")
         }
-        if spatialPreviewPoints.count < 40 {
+        if spatialPreviewPoints.count < 80 {
             failures.append("공간 구조점이 부족합니다. 바닥만 찍지 말고 벽과 바닥이 함께 보이게 천천히 훑어 주세요.")
         }
-        if normalTrackingRatio < 0.70 {
+        if normalTrackingRatio < 0.82 {
             failures.append("추적이 자주 불안정했습니다. 흰 벽보다 특징이 많은 벽면을 보며 다시 스캔해 주세요.")
         }
-        if averageFeaturePointCount < 70 {
+        if averageFeaturePointCount < 90 {
             failures.append("특징점이 부족합니다. 안내판, 문틀, 모서리, 가구가 보이게 다시 스캔해 주세요.")
         }
-        if trackingJumpCount > max(3, samples.count / 12) {
+        if trackingJumpCount > max(2, samples.count / 18) {
             failures.append("스캔 중 위치 점프가 많았습니다. 급회전 없이 천천히 다시 스캔해 주세요.")
         }
-        if totalDistance < 8.0 {
-            failures.append("이동 거리가 너무 짧습니다. 보행 경로를 따라 8미터 이상 이동한 뒤 끝내 주세요.")
+        if totalDistance < 12.0 {
+            failures.append("이동 거리가 너무 짧습니다. 방 둘레와 주요 통로를 따라 12미터 이상 이동한 뒤 끝내 주세요.")
         }
         return failures
     }
@@ -1161,7 +1378,13 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 ambientIntensity: sample.ambientIntensity,
                 motionSpeedMps: sample.motionSpeedMps,
                 angularSpeedDps: sample.angularSpeedDps,
-                trackingQuality: sample.trackingQuality
+                trackingQuality: sample.trackingQuality,
+                magneticFieldX: sample.magneticFieldX,
+                magneticFieldY: sample.magneticFieldY,
+                magneticFieldZ: sample.magneticFieldZ,
+                magneticFieldAccuracy: sample.magneticFieldAccuracy,
+                pressureKpa: sample.pressureKpa,
+                relativeAltitudeM: sample.relativeAltitudeM
             )
         }
     }
@@ -1230,8 +1453,19 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1 / 20
         motion.startDeviceMotionUpdates(using: .xMagneticNorthZVertical, to: .main) { [weak self] sample, _ in
-            guard let self, let yaw = sample?.attitude.yaw else { return }
+            guard let self, let sample else { return }
+            let yaw = sample.attitude.yaw
             self.latestMagneticYawDegrees = self.normalized360(-(yaw * 180 / .pi))
+            self.latestMagneticField = sample.magneticField
+        }
+    }
+
+    private func startBarometerUpdates() {
+        guard CMAltimeter.isRelativeAltitudeAvailable() else { return }
+        altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data else { return }
+            self.latestPressureKpa = data.pressure.doubleValue
+            self.latestRelativeAltitudeM = data.relativeAltitude.doubleValue
         }
     }
 
@@ -1259,27 +1493,41 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     ) {
         guard capturedKeyframes.count < maxKeyframeCount else { return }
         let supportsDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
-        let minInterval = supportsDepth ? 0.85 : 0.42
-        let minDistance: Float = supportsDepth ? 0.45 : 0.20
-        let minRotationDegrees = supportsDepth ? 16.0 : 10.0
-        let minQuality = supportsDepth ? 0.64 : 0.58
+        let minInterval = supportsDepth ? 0.45 : 0.20
+        let minDistance: Float = supportsDepth ? 0.22 : 0.08
+        let minRotationDegrees = supportsDepth ? 8.0 : 5.0
+        let minQuality = supportsDepth ? 0.58 : 0.52
         guard trackingState == "normal", trackingQuality >= minQuality, frame.timestamp - lastKeyframeTime >= minInterval else { return }
         let rotation = simd_quatf(frame.camera.transform)
+        var displacement = Double.infinity
+        var rotationDelta = Double.infinity
+        var selectionReason = "initial_anchor"
         if let lastKeyframePosition, let lastKeyframeRotation {
-            let movedEnough = simd_distance(lastKeyframePosition, position) >= minDistance
-            let rotatedEnough = angularDistanceDegrees(lastKeyframeRotation, rotation) >= minRotationDegrees
+            displacement = Double(simd_distance(lastKeyframePosition, position))
+            rotationDelta = angularDistanceDegrees(lastKeyframeRotation, rotation)
+            let movedEnough = displacement >= Double(minDistance)
+            let rotatedEnough = rotationDelta >= minRotationDegrees
             if !movedEnough && !rotatedEnough { return }
+            if movedEnough && rotatedEnough {
+                selectionReason = "parallax_and_view_angle"
+            } else if movedEnough {
+                selectionReason = "parallax_distance"
+            } else {
+                selectionReason = "view_angle_change"
+            }
         }
+        let featureScore = min(Double(frame.rawFeaturePoints?.points.count ?? 0) / 180.0, 1.0)
+        let selectionScore = min(1.0, max(0.0, trackingQuality * 0.62 + featureScore * 0.25 + min((displacement.isFinite ? displacement : Double(minDistance)) / Double(minDistance), 1.0) * 0.13))
 
         let source = CIImage(cvPixelBuffer: frame.capturedImage)
-        let targetMaxDimension: CGFloat = supportsDepth ? 1440 : 1280
+        let targetMaxDimension: CGFloat = supportsDepth ? 1920 : 1600
         let scale = min(1, targetMaxDimension / max(source.extent.width, source.extent.height))
         let image = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let data = imageContext.jpegRepresentation(
             of: image,
             colorSpace: colorSpace,
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: supportsDepth ? 0.74 : 0.70]
+            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: supportsDepth ? 0.86 : 0.82]
         ) else { return }
 
         let frameID = "frame_\(capturedKeyframes.count + 1)"
@@ -1298,7 +1546,11 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 byteCount: data.count,
                 depthWidth: depth?.width,
                 depthHeight: depth?.height,
-                depthByteCount: depth?.byteCount
+                depthByteCount: depth?.byteCount,
+                selectionReason: selectionReason,
+                selectionScore: selectionScore,
+                displacementM: displacement.isFinite ? displacement : nil,
+                rotationDeltaDegrees: rotationDelta.isFinite ? rotationDelta : nil
             )
             capturedKeyframes.append(CapturedKeyframe(metadata: metadata, fileURL: fileURL, depthFileURL: depth?.url))
             keyframeCount = capturedKeyframes.count
@@ -1332,16 +1584,66 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private func saveLocalDraftIfNeeded() {
         guard let completedManifest else { return }
         do {
-            let directory = scanDirectory(for: completedManifest.sessionId)
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.keyEncodingStrategy = .convertToSnakeCase
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(completedManifest)
-            try data.write(to: directory.appending(path: "manifest.json"), options: .atomic)
+            try writeLocalScanManifest(completedManifest)
         } catch {
             message = "스캔 명세를 로컬에 저장하지 못했습니다: \(error.localizedDescription)"
         }
+    }
+
+    private func autosaveLocalScanIfNeeded(frameTimestamp: TimeInterval) {
+        guard frameTimestamp - lastLocalAutosaveTime >= 2.0,
+              let manifest = localAutosaveManifestSnapshot() else {
+            return
+        }
+        lastLocalAutosaveTime = frameTimestamp
+        do {
+            try writeLocalScanManifest(manifest)
+            refreshLocalDrafts()
+        } catch {
+            message = "스캔 자동 저장 실패: \(error.localizedDescription)"
+        }
+    }
+
+    private func localAutosaveManifestSnapshot() -> ScanManifestValue? {
+        guard let startedAt, samples.count >= 2, !capturedKeyframes.isEmpty else { return nil }
+        return ScanManifestValue(
+            schemaVersion: 1,
+            sessionId: currentSessionID,
+            buildingId: completedManifest?.buildingId ?? UUID(),
+            floorId: floorName,
+            mapNorthDegrees: mapNorthDegrees,
+            latitude: scanLatitude,
+            longitude: scanLongitude,
+            horizontalAccuracyM: scanHorizontalAccuracyM,
+            startedAt: startedAt,
+            endedAt: Date(),
+            deviceModel: UIDevice.current.model,
+            supportsSceneDepth: ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth),
+            totalDistanceM: totalDistance,
+            samples: samples,
+            keyframes: capturedKeyframes.map(\.metadata),
+            spatialSamples: Array(spatialPreviewPoints.prefix(300)),
+            meshAnchorCount: meshAnchorCount,
+            planeAnchorCount: planeAnchorCount,
+            meshVertexCount: meshVertexCount,
+            datasetSchemaVersion: 1,
+            capturePurpose: "indoor_navigation_physical_ai_dataset",
+            privacyMode: "avoid_people_faces_documents",
+            physicalAiCaptureEnabled: true,
+            qualityProfile: "navigation_and_robot_learning",
+            datasetRightsStatus: "facility_permission_required_before_resale",
+            privacyReviewStatus: "autosaved_before_upload"
+        )
+    }
+
+    private func writeLocalScanManifest(_ manifest: ScanManifestValue) throws {
+        let directory = scanDirectory(for: manifest.sessionId)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(manifest)
+        try data.write(to: directory.appending(path: "manifest.json"), options: .atomic)
     }
 
     private func deleteUploadedLocalDraft(sessionID: UUID) {

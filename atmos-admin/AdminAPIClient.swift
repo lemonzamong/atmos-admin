@@ -82,6 +82,15 @@ struct AdminAPIClient {
         return try decoder.decode(AdminSystemStatusValue.self, from: data)
     }
 
+    func pipelineReadiness() async throws -> PipelineReadinessResponseValue {
+        let request = URLRequest(url: baseURL.appending(path: "/v1/admin/pipeline-readiness"))
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PipelineReadinessResponseValue.self, from: data)
+    }
+
     private func uploadDepth(buildingID: UUID, sessionID: UUID, frameID: String, fileURL: URL) async throws {
         var request = URLRequest(url: baseURL.appending(path: "/v1/buildings/\(buildingID.uuidString)/scans/\(sessionID.uuidString)/depth/\(frameID)"))
         request.httpMethod = "PUT"
@@ -115,6 +124,16 @@ struct AdminAPIClient {
         return try decoder.decode([ProcessingJobValue].self, from: data)
     }
 
+    func scanStatus(sessionID: UUID) async throws -> ScanStatusValue {
+        let request = URLRequest(url: baseURL.appending(path: "/v1/scans/\(sessionID.uuidString)/status"))
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ScanStatusValue.self, from: data)
+    }
+
     func sceneGraph(buildingID: UUID, sessionID: UUID) async throws -> SceneGraphValue {
         let request = URLRequest(url: baseURL.appending(path: "/v1/buildings/\(buildingID.uuidString)/scans/\(sessionID.uuidString)/scene-graph"))
         let (data, response) = try await performData(request, retryCount: 2)
@@ -133,9 +152,31 @@ struct AdminAPIClient {
         return try decoder.decode(DigitalTwinAssetManifestValue.self, from: data)
     }
 
+    func bevMap(buildingID: UUID, sessionID: UUID) async throws -> BEVMapManifestValue {
+        let request = URLRequest(url: baseURL.appending(path: "/v1/buildings/\(buildingID.uuidString)/scans/\(sessionID.uuidString)/bev-map"))
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(BEVMapManifestValue.self, from: data)
+    }
+
     func downloadDigitalTwinPointCloud(_ manifest: DigitalTwinAssetManifestValue) async throws -> URL {
         guard let path = manifest.pointCloudUrl, let url = resolvedURL(path) else {
             throw APIError.processingFailed("디지털트윈 point cloud 주소가 없습니다.")
+        }
+        let request = URLRequest(url: url)
+        let (temporaryURL, response) = try await session.download(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300 ~= http.statusCode) {
+            throw APIError.serverMessage(statusCode: http.statusCode, detail: nil)
+        }
+        return temporaryURL
+    }
+
+    func downloadBEVOccupancy(_ manifest: BEVMapManifestValue) async throws -> URL {
+        guard let path = manifest.previewUrl ?? manifest.occupancyUrl, let url = resolvedURL(path) else {
+            throw APIError.processingFailed("BEV occupancy map 주소가 없습니다.")
         }
         let request = URLRequest(url: url)
         let (temporaryURL, response) = try await session.download(for: request)
@@ -152,6 +193,49 @@ struct AdminAPIClient {
         try validate(response: response, data: data)
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(PublishReceiptValue.self, from: data)
+    }
+
+    func validateSpace(sessionID: UUID) async throws -> MapValidationResultValue {
+        var request = URLRequest(url: baseURL.appending(path: "/v1/spaces/\(sessionID.uuidString)/validate"))
+        request.httpMethod = "POST"
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(MapValidationResultValue.self, from: data)
+    }
+
+    func publishSpace(sessionID: UUID) async throws -> PublishReceiptValue {
+        var request = URLRequest(url: baseURL.appending(path: "/v1/spaces/\(sessionID.uuidString)/publish"))
+        request.httpMethod = "POST"
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PublishReceiptValue.self, from: data)
+    }
+
+    func saveDraftMap(sessionID: UUID, routeGraph: DraftRouteGraphValue, comment: String) async throws -> DraftMapRecordValue {
+        var request = URLRequest(url: baseURL.appending(path: "/v1/spaces/\(sessionID.uuidString)/draft-map"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        request.httpBody = try encoder.encode(
+            DraftMapPatchValue(
+                baseRevision: nil,
+                floorplan: nil,
+                routeGraph: routeGraph,
+                sceneGraph: nil,
+                comment: comment
+            )
+        )
+        let (data, response) = try await performData(request, retryCount: 2)
+        try validate(response: response, data: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DraftMapRecordValue.self, from: data)
     }
 
     func packageVersions(buildingID: UUID) async throws -> [PackageVersionInfoValue] {
@@ -368,8 +452,6 @@ struct AdminAPIClient {
 
 enum AdminServerConfiguration {
     static var baseURL: URL {
-        if let value = Bundle.main.object(forInfoDictionaryKey: "ATMOS_API_BASE_URL") as? String,
-           let url = URL(string: value), !value.isEmpty { return url }
         return URL(string: "https://riav.duckdns.org")!
     }
 
@@ -378,10 +460,6 @@ enum AdminServerConfiguration {
     }
 
     static var defaultBaseURLString: String {
-        if let value = Bundle.main.object(forInfoDictionaryKey: "ATMOS_API_BASE_URL") as? String,
-           !value.isEmpty {
-            return value
-        }
         return "https://riav.duckdns.org"
     }
 }
