@@ -1258,10 +1258,13 @@ struct ContentView: View {
 
     private func aiReviewSummary(_ graph: SceneGraphValue) -> some View {
         let semanticNodes = semanticReviewNodes(in: graph)
+        let allSemanticNodes = semanticReviewNodes(in: graph, includeHidden: true)
         let destinations = semanticNodes.filter { $0.attributes["destination_candidate"] == "true" || $0.attributes["auto_review"] == "recommended" }
         let needsLabel = semanticNodes.filter { $0.attributes["needs_admin_review"] == "true" || $0.attributes["needs_human_label"] == "true" || $0.labels.first?.contains("표지판") == true }
         let verticals = semanticNodes.filter { ["elevator", "stairs", "escalator"].contains($0.attributes["node_type"] ?? $0.attributes["suggested_kind"] ?? $0.kind) }
+        let portals = semanticNodes.filter { $0.attributes["candidate_role"] == "portal" || ["door", "exit"].contains($0.attributes["node_type"] ?? $0.attributes["suggested_kind"] ?? $0.kind) }
         let hazards = semanticNodes.filter { $0.attributes["hazard"] == "true" }
+        let hiddenCount = max(0, allSemanticNodes.count - semanticNodes.count)
         return VStack(alignment: .leading, spacing: 14) {
             Text("AI가 찾은 확인 항목")
                 .font(.title3.weight(.black))
@@ -1273,7 +1276,11 @@ struct ContentView: View {
                 }
                 HStack(spacing: 8) {
                     reviewStat("층 이동", "\(verticals.count)", AdminTheme.violet)
+                    reviewStat("문·통과", "\(portals.count)", AdminTheme.route)
+                }
+                HStack(spacing: 8) {
                     reviewStat("주의", "\(hazards.count)", AdminTheme.danger)
+                    reviewStat("숨긴 일반 태그", "\(hiddenCount)", AdminTheme.mutedInk)
                 }
             }
             HStack(spacing: 10) {
@@ -1290,7 +1297,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(AdminPrimaryButtonStyle())
             }
-            Text("추천 적용은 스캔 경로와 신뢰도 높은 목적지를 승인합니다. 잘못 잡힌 방 이름이나 출입 제한 후보만 고친 뒤 게시하면 됩니다.")
+            Text("일반 물체 태그는 기본 목록에서 숨기고, 목적지·층 이동·문·장애물 후보만 우선 검수합니다. 숨긴 태그는 검색하면 확인할 수 있습니다.")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(AdminTheme.mutedInk)
         }
@@ -1318,11 +1325,11 @@ struct ContentView: View {
     }
 
     private func reviewNodes(for graph: SceneGraphValue) -> [SceneGraphNodeValue] {
-        let nodes = semanticReviewNodes(in: graph)
         let query = reviewSearchText
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .filter { !$0.isWhitespace }
+        let nodes = semanticReviewNodes(in: graph, includeHidden: !query.isEmpty)
         guard !query.isEmpty else { return nodes }
         return nodes.filter { node in
             let searchable = (
@@ -1343,8 +1350,13 @@ struct ContentView: View {
     }
 
     private func semanticReviewNodes(in graph: SceneGraphValue) -> [SceneGraphNodeValue] {
+        semanticReviewNodes(in: graph, includeHidden: false)
+    }
+
+    private func semanticReviewNodes(in graph: SceneGraphValue, includeHidden: Bool) -> [SceneGraphNodeValue] {
         graph.nodes
             .filter { !$0.id.hasPrefix("trajectory:") && !["floor", "space_sample"].contains($0.kind) }
+            .filter { includeHidden || $0.attributes["review_visibility"] != "hidden" }
             .sorted { lhs, rhs in
                 let lhsPriority = reviewPriority(lhs)
                 let rhsPriority = reviewPriority(rhs)
@@ -1358,6 +1370,7 @@ struct ContentView: View {
         if node.attributes["needs_admin_review"] == "true" || node.attributes["needs_human_label"] == "true" { return 1 }
         let nodeType = node.attributes["node_type"] ?? node.attributes["suggested_kind"] ?? node.kind
         if ["elevator", "stairs", "escalator"].contains(nodeType) { return 2 }
+        if node.attributes["candidate_role"] == "portal" { return 3 }
         if node.attributes["destination_candidate"] == "true" || node.attributes["auto_review"] == "recommended" { return 3 }
         return 4
     }
