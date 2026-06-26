@@ -2293,10 +2293,10 @@ private struct MapValidationNotice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(validation.publishable ? "게시 전 검증 경고" : "게시 전 검증 실패", systemImage: validation.publishable ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
+            Label(title, systemImage: validation.publishable ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
                 .font(.headline.weight(.black))
                 .foregroundStyle(validation.publishable ? AdminTheme.caution : AdminTheme.danger)
-            ForEach(validation.issues.prefix(5)) { issue in
+            ForEach(prioritizedIssues.prefix(8)) { issue in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: issue.severity == "blocking" ? "xmark.circle.fill" : "exclamationmark.circle.fill")
                         .foregroundStyle(issue.severity == "blocking" ? AdminTheme.danger : AdminTheme.caution)
@@ -2306,10 +2306,36 @@ private struct MapValidationNotice: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            if hiddenIssueCount > 0 {
+                Text("그 외 확인 항목 \(hiddenIssueCount)개가 더 있습니다.")
+                    .font(.caption.weight(.black))
+                    .foregroundStyle(AdminTheme.mutedInk)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background((validation.publishable ? AdminTheme.caution : AdminTheme.danger).opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var title: String {
+        let blockers = validation.issues.filter { $0.severity == "blocking" }.count
+        if validation.publishable {
+            return "게시 전 검증 경고"
+        }
+        return blockers > 0 ? "게시 전 검증 실패 · 차단 \(blockers)개" : "게시 전 검증 실패"
+    }
+
+    private var prioritizedIssues: [MapValidationIssueValue] {
+        validation.issues.sorted { lhs, rhs in
+            if lhs.severity != rhs.severity {
+                return lhs.severity == "blocking"
+            }
+            return lhs.code < rhs.code
+        }
+    }
+
+    private var hiddenIssueCount: Int {
+        max(0, validation.issues.count - 8)
     }
 }
 
